@@ -1,0 +1,6 @@
+[db]
+url = "http://127.0.0.1:8123"
+user = "your_user"
+password = "your_password"
+database = "your_database"
+pool_size = 5

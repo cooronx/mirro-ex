@@ -1,0 +1,5 @@
+/target
+/config/conf.toml
+/docs_for_agent
+.codex
+.agents

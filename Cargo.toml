@@ -1,0 +1,12 @@
+[package]
+name = "mirro-ex"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+clickhouse = "0.15.0"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.17"
+tokio = { version = "1.52.3",features = ["full"]}
+toml = "0.9.8"
