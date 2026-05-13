@@ -4,6 +4,7 @@ mod db;
 mod sim_clock;
 
 
+use core::range;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -11,6 +12,8 @@ use clickhouse::Row;
 use serde::Deserialize;
 
 use crate::config::{AppConfig, DbConfig};
+use crate::db::dbpool::DbPool;
+use crate::db::sh_order_query::{SHOrderByRangeQuery, SHOrderRangeQuery, query_sh_order_message_ranges, query_sh_orders_by_range};
 use crate::sim_clock::SimClock;
 
 #[derive(Row, Deserialize, Debug)]
@@ -21,26 +24,14 @@ struct MyRow {
 }
 
 async fn test_hell(config: &DbConfig) -> Result<()> {
-    let client = crate::db::dbpool::build_client(config);
-
-    let sql_str = r#"SELECT 
-                            MIN(message_number) AS min_seq,
-                            MAX(message_number) AS max_seq,
-                            channel
-                            FROM L2_order_rt_distributed
-                            WHERE EventDate = toDate('2026-05-12')
-                            GROUP BY channel
-                            ORDER BY channel"#;
-    let mut row_s = client
-        .query(sql_str)
-        .fetch::<MyRow>()
-        .context("failed to start clickhouse query")?;
-    while let Some(row) = row_s
-        .next()
-        .await
-        .context("failed to fetch next clickhouse row")?
-    {
-        println!("{:?}", row);
+    let db_pool = DbPool::new(config)?;
+    let query = SHOrderRangeQuery::new("2026-05-12", 1778549940000, 1778550120000);
+    let ranges = query_sh_order_message_ranges(&db_pool, &query).await?;
+    for range in ranges {
+        // println!("{:?}",range);
+        let query = SHOrderByRangeQuery::new("2026-05-12", range.channel, range.begin_message_number, range.end_message_number);
+        let thing = query_sh_orders_by_range(&db_pool, &query).await?;
+        println!("{}",thing.len());
     }
 
     Ok(())
