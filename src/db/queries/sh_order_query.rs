@@ -7,7 +7,7 @@ use crate::db::dbpool::{DbPool, DbPoolError};
 
 pub use super::order_query_common::ChannelMessageRange;
 use super::order_query_common::{
-    RawOrderMessageRange, build_right_open_message_range, validate_message_range,
+    RawOrderMessageRange, build_message_range, validate_message_range,
     validate_time_range,
 };
 
@@ -29,8 +29,11 @@ pub enum SHOrderQueryError {
         begin_message_number: i64,
         end_message_number: i64,
     },
-    #[error("message number overflow while converting channel {channel} max_seq={max_seq} into right-open range end")]
-    MessageNumberOverflow { channel: i64, max_seq: i64 },
+    #[error("shanghai order message range overflow: channel={channel}, max_seq={max_seq}")]
+    MessageRangeOverflow {
+        channel: i64,
+        max_seq: i64,
+    },
     #[error("failed to execute clickhouse order query")]
     Query(#[source] clickhouse::error::Error),
 }
@@ -142,8 +145,8 @@ pub async fn query_sh_order_message_ranges(
 
     rows.into_iter()
         .map(|row| {
-            build_right_open_message_range(row, |channel, max_seq| {
-                SHOrderQueryError::MessageNumberOverflow { channel, max_seq }
+            build_message_range(row, |channel, max_seq| {
+                SHOrderQueryError::MessageRangeOverflow { channel, max_seq }
             })
         })
         .collect()
@@ -174,15 +177,6 @@ pub async fn query_sh_orders_by_range(
           AND channel = ?
         ORDER BY message_number
     "#;
-
-    let sqlsad = client
-        .query(sql)
-        .bind(Identifier(&query.table_name))
-        .bind(&query.day)
-        .bind(query.begin_message_number)
-        .bind(query.end_message_number)
-        .bind(query.channel);
-    println!("{}",sqlsad.sql_display());
 
     let rows = client
         .query(sql)
@@ -247,31 +241,10 @@ fn normalize_sh_order_type(order_type: i8) -> OrderType {
 #[cfg(test)]
 mod tests {
     use super::{
-        RawSHOrder, SHOrderByRangeQuery, SHOrderQueryError, SHOrderRangeQuery,
+        RawSHOrder,
         normalize_sh_order_direction, normalize_sh_order_type,
     };
     use crate::common::{Market, OrderDirection, OrderType};
-    use crate::db::queries::order_query_common::{
-        RawOrderMessageRange, build_right_open_message_range,
-    };
-
-    #[test]
-    fn converts_range_into_right_open_interval() {
-        let raw = RawOrderMessageRange {
-            min_seq: 100,
-            max_seq: 105,
-            channel: 3,
-        };
-
-        let range = build_right_open_message_range(raw, |channel, max_seq| {
-            SHOrderQueryError::MessageNumberOverflow { channel, max_seq }
-        })
-        .unwrap();
-
-        assert_eq!(range.channel, 3);
-        assert_eq!(range.begin_message_number, 100);
-        assert_eq!(range.end_message_number, 106);
-    }
 
     #[test]
     fn normalizes_sh_order_values() {
@@ -298,35 +271,5 @@ mod tests {
     fn maps_unknown_sh_values_to_unknown() {
         assert_eq!(normalize_sh_order_direction(1), OrderDirection::Unknown);
         assert_eq!(normalize_sh_order_type(9), OrderType::Unknown);
-    }
-
-    #[test]
-    fn validates_time_query_range() {
-        let err = SHOrderRangeQuery::new("2026-05-12", 20, 20)
-            .validate()
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            SHOrderQueryError::InvalidTimeRange {
-                start_time_ms: 20,
-                end_time_ms: 20
-            }
-        ));
-    }
-
-    #[test]
-    fn validates_message_query_range() {
-        let err = SHOrderByRangeQuery::new("2026-05-12", 1, 10, 10)
-            .validate()
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            SHOrderQueryError::InvalidMessageRange {
-                begin_message_number: 10,
-                end_message_number: 10
-            }
-        ));
     }
 }

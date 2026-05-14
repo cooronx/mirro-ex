@@ -1,0 +1,344 @@
+use thiserror::Error;
+use tokio::task::JoinError;
+
+use crate::common::{L2Order, Market};
+use crate::db::dbpool::DbPool;
+use crate::db::queries::sh_order_query::{
+    SHOrderByRangeQuery, SHOrderQueryError, SHOrderRangeQuery, query_sh_order_message_ranges,
+    query_sh_orders_by_range,
+};
+use crate::db::queries::sz_order_query::{
+    SZOrderByRangeQuery, SZOrderQueryError, SZOrderRangeQuery, query_sz_order_message_ranges,
+    query_sz_orders_by_range,
+};
+
+use super::event::ReplayEvent;
+use super::reader_cursor::{ChannelRange, ReaderCursor};
+
+pub type Result<T> = std::result::Result<T, ReplayDbReaderError>;
+
+#[derive(Debug, Error)]
+pub enum ReplayDbReaderError {
+    #[error("batch_size must be greater than 0")]
+    InvalidBatchSize,
+    #[error("max_batches must be greater than 0")]
+    InvalidMaxBatches,
+    #[error("sh order query failed")]
+    SHOrderQuery(#[from] SHOrderQueryError),
+    #[error("sz order query failed")]
+    SZOrderQuery(#[from] SZOrderQueryError),
+    #[error("failed to join replay batch task")]
+    JoinTask(#[source] JoinError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedBatch {
+    pub market: Market,
+    pub channel: i64,
+    pub day: String,
+    pub begin_message_number: i64,
+    pub end_message_number: i64,
+    pub events: Vec<ReplayEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CursorBatchSpec {
+    cursor_index: usize,
+    range: ChannelRange,
+    begin_message_number: i64,
+    end_message_number: i64,
+}
+
+#[derive(Clone)]
+pub struct ReplayDbReader {
+    pool: DbPool,
+    batch_size: i64,
+    cursors: Vec<ReaderCursor>,
+    /**
+     * 下一个游标的序号
+     * 因为 max_batches 通常会小于 channel 数，如果每次就单纯的按顺序循环数组的话会出现总是只能拿到前几个channel
+     * 导致前几个channel被推进的非常快，而后面几个甚至有可能一直不推进
+     * 所以我们需要记录一下游标的序号，这样确保每一个channel都可以被正常循环读取到
+     */
+    next_cursor_index: usize,
+}
+
+impl ReplayDbReader {
+    pub fn new(pool: DbPool, batch_size: i64, cursors: Vec<ReaderCursor>) -> Result<Self> {
+        if batch_size <= 0 {
+            return Err(ReplayDbReaderError::InvalidBatchSize);
+        }
+
+        Ok(Self {
+            pool,
+            batch_size,
+            cursors,
+            next_cursor_index: 0,
+        })
+    }
+
+    pub async fn from_order_range_queries(
+        pool: DbPool,
+        batch_size: i64,
+        sh_query: Option<&SHOrderRangeQuery>,
+        sz_query: Option<&SZOrderRangeQuery>,
+    ) -> Result<Self> {
+        let mut cursors = Vec::new();
+
+        if let Some(query) = sh_query {
+            let ranges = query_sh_order_message_ranges(&pool, query).await?;
+            cursors.extend(
+                ranges
+                    .into_iter()
+                    .map(|range| {
+                        ChannelRange::new(
+                            &query.day,
+                            Market::XSHG,
+                            range.channel,
+                            range.begin_message_number,
+                            range.end_message_number,
+                        )
+                    })
+                    .map(ReaderCursor::new),
+            );
+        }
+
+        if let Some(query) = sz_query {
+            let ranges = query_sz_order_message_ranges(&pool, query).await?;
+            cursors.extend(
+                ranges
+                    .into_iter()
+                    .map(|range| {
+                        ChannelRange::new(
+                            &query.day,
+                            Market::XSHE,
+                            range.channel,
+                            range.begin_message_number,
+                            range.end_message_number,
+                        )
+                    })
+                    .map(ReaderCursor::new),
+            );
+        }
+
+        Self::new(pool, batch_size, cursors)
+    }
+
+    pub fn batch_size(&self) -> i64 {
+        self.batch_size
+    }
+
+    pub fn cursors(&self) -> &[ReaderCursor] {
+        &self.cursors
+    }
+
+    pub fn cursors_mut(&mut self) -> &mut [ReaderCursor] {
+        &mut self.cursors
+    }
+
+    pub fn has_unfinished(&self) -> bool {
+        self.cursors.iter().any(|cursor| !cursor.finished)
+    }
+
+    pub async fn fetch_next_batches(&mut self, max_batches: usize) -> Result<Vec<FetchedBatch>> {
+        if max_batches == 0 {
+            return Err(ReplayDbReaderError::InvalidMaxBatches);
+        }
+
+        let (batch_specs, next_cursor_index) = self.plan_next_batch_specs(max_batches);
+        if batch_specs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut handles = Vec::with_capacity(batch_specs.len());
+        for batch_spec in &batch_specs {
+            let pool = self.pool.clone();
+            let batch_spec = batch_spec.clone();
+            handles.push(tokio::spawn(async move {
+                ReplayDbReader::fetch_batch_for_spec(pool, batch_spec).await
+            }));
+        }
+
+        let mut fetched_batches = Vec::with_capacity(handles.len());
+        let mut first_error = None;
+
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(batch)) => fetched_batches.push(batch),
+                Ok(Err(err)) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(ReplayDbReaderError::JoinTask(err));
+                    }
+                }
+            }
+        }
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
+        self.commit_batch_specs(&batch_specs, next_cursor_index);
+        Ok(fetched_batches)
+    }
+
+    fn plan_next_batch_specs(&self, max_batches: usize) -> (Vec<CursorBatchSpec>, usize) {
+        if self.cursors.is_empty() || !self.has_unfinished() {
+            return (Vec::new(), self.next_cursor_index);
+        }
+
+        let cursor_count = self.cursors.len();
+        let mut cursor_index = self.next_cursor_index % cursor_count;
+        let mut planned_batches = Vec::with_capacity(max_batches.min(cursor_count));
+        let mut inspected = 0;
+
+        while inspected < cursor_count && planned_batches.len() < max_batches {
+            let cursor = &self.cursors[cursor_index];
+            if !cursor.finished {
+                planned_batches.push(CursorBatchSpec {
+                    cursor_index,
+                    range: cursor.range.clone(),
+                    begin_message_number: cursor.next_message_number,
+                    end_message_number: cursor.current_batch_end(self.batch_size),
+                });
+            }
+
+            cursor_index = (cursor_index + 1) % cursor_count;
+            inspected += 1;
+        }
+
+        (planned_batches, cursor_index)
+    }
+
+    fn commit_batch_specs(
+        &mut self,
+        batch_specs: &[CursorBatchSpec],
+        next_cursor_index: usize,
+    ) {
+        for batch_spec in batch_specs {
+            self.cursors[batch_spec.cursor_index]
+                .advance_to(batch_spec.end_message_number);
+        }
+        self.next_cursor_index = next_cursor_index;
+    }
+
+    async fn fetch_batch_for_spec(pool: DbPool, batch_spec: CursorBatchSpec) -> Result<FetchedBatch> {
+        let orders = Self::fetch_orders_for_spec(&pool, &batch_spec).await?;
+
+        Ok(FetchedBatch {
+            market: batch_spec.range.market,
+            channel: batch_spec.range.channel,
+            day: batch_spec.range.day.clone(),
+            begin_message_number: batch_spec.begin_message_number,
+            end_message_number: batch_spec.end_message_number,
+            events: orders.into_iter().map(ReplayEvent::Order).collect(),
+        })
+    }
+
+    async fn fetch_orders_for_spec(pool: &DbPool, batch_spec: &CursorBatchSpec) -> Result<Vec<L2Order>> {
+        match batch_spec.range.market {
+            Market::XSHG => {
+                let query = SHOrderByRangeQuery::new(
+                    &batch_spec.range.day,
+                    batch_spec.range.channel,
+                    batch_spec.begin_message_number,
+                    batch_spec.end_message_number,
+                );
+                Ok(query_sh_orders_by_range(pool, &query).await?)
+            }
+            Market::XSHE => {
+                let query = SZOrderByRangeQuery::new(
+                    &batch_spec.range.day,
+                    batch_spec.range.channel,
+                    batch_spec.begin_message_number,
+                    batch_spec.end_message_number,
+                );
+                Ok(query_sz_orders_by_range(pool, &query).await?)
+            }
+            Market::Unknown => Ok(Vec::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FetchedBatch, ReplayDbReader};
+    use crate::common::Market;
+    use crate::db::dbpool::build_client;
+    use crate::replay::reader_cursor::{ChannelRange, ReaderCursor};
+    use crate::config::DbConfig;
+
+    fn test_pool() -> crate::db::dbpool::DbPool {
+        let config = DbConfig {
+            url: "http://127.0.0.1:8123".to_string(),
+            user: "user".to_string(),
+            password: "password".to_string(),
+            database: "db".to_string(),
+            pool_size: 1,
+        };
+
+        crate::db::dbpool::DbPool::with_client(1, build_client(&config)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fetches_multiple_batches_and_advances_cursors() {
+        let pool = test_pool();
+        let cursors = vec![
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 15)),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 27)),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 30)),
+        ];
+        let mut reader = ReplayDbReader::new(pool, 3, cursors).unwrap();
+
+        let batches = reader.fetch_next_batches(2).await.unwrap();
+
+        assert_eq!(
+            batches,
+            vec![
+                FetchedBatch {
+                    market: Market::Unknown,
+                    channel: 1,
+                    day: "2026-05-12".to_string(),
+                    begin_message_number: 10,
+                    end_message_number: 13,
+                    events: Vec::new(),
+                },
+                FetchedBatch {
+                    market: Market::Unknown,
+                    channel: 2,
+                    day: "2026-05-12".to_string(),
+                    begin_message_number: 20,
+                    end_message_number: 23,
+                    events: Vec::new(),
+                },
+            ]
+        );
+        assert_eq!(reader.cursors()[0].next_message_number, 13);
+        assert_eq!(reader.cursors()[1].next_message_number, 23);
+        assert_eq!(reader.cursors()[2].next_message_number, 30);
+        assert_eq!(reader.next_cursor_index, 2);
+    }
+
+    #[tokio::test]
+    async fn continues_round_robin_across_calls() {
+        let pool = test_pool();
+        let cursors = vec![
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 14)),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 24)),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 34)),
+        ];
+        let mut reader = ReplayDbReader::new(pool, 2, cursors).unwrap();
+
+        let first_batches = reader.fetch_next_batches(2).await.unwrap();
+        let second_batches = reader.fetch_next_batches(2).await.unwrap();
+
+        assert_eq!(first_batches[0].channel, 1);
+        assert_eq!(first_batches[1].channel, 2);
+        assert_eq!(second_batches[0].channel, 3);
+        assert_eq!(second_batches[1].channel, 1);
+    }
+}

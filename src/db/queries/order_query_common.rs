@@ -39,14 +39,18 @@ pub(crate) fn validate_message_range<E>(
     Ok(())
 }
 
-pub(crate) fn build_right_open_message_range<E>(
+pub(crate) fn build_message_range<E>(
     value: RawOrderMessageRange,
     make_overflow_err: impl FnOnce(i64, i64) -> E,
 ) -> std::result::Result<ChannelMessageRange, E> {
+    let end_message_number = value
+        .max_seq
+        .checked_add(1)
+        .ok_or_else(|| make_overflow_err(value.channel, value.max_seq))?;
 
     Ok(ChannelMessageRange {
         channel: value.channel,
         begin_message_number: value.min_seq,
-        end_message_number:value.max_seq,
+        end_message_number,
     })
 }
