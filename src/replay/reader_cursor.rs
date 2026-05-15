@@ -7,6 +7,7 @@ pub struct ChannelRange {
     pub channel: i64,
     pub begin_message_number: i64,
     pub end_message_number: i64,
+    pub table_name: String,
 }
 
 impl ChannelRange {
@@ -16,6 +17,7 @@ impl ChannelRange {
         channel: i64,
         begin_message_number: i64,
         end_message_number: i64,
+        table_name: impl Into<String>,
     ) -> Self {
         Self {
             day: day.into(),
@@ -23,6 +25,7 @@ impl ChannelRange {
             channel,
             begin_message_number,
             end_message_number,
+            table_name: table_name.into(),
         }
     }
 }
@@ -75,7 +78,7 @@ mod tests {
 
     #[test]
     fn initializes_cursor_at_range_start() {
-        let range = ChannelRange::new("2026-05-12", Market::XSHG, 3, 100, 120);
+        let range = ChannelRange::new("2026-05-12", Market::XSHG, 3, 100, 120, "sh_table");
         let cursor = ReaderCursor::new(range);
 
         assert_eq!(cursor.next_message_number, 100);
@@ -85,7 +88,7 @@ mod tests {
 
     #[test]
     fn advances_cursor_and_marks_finish() {
-        let range = ChannelRange::new("2026-05-12", Market::XSHE, 7, 10, 15);
+        let range = ChannelRange::new("2026-05-12", Market::XSHE, 7, 10, 15, "sz_table");
         let mut cursor = ReaderCursor::new(range);
 
         assert_eq!(cursor.current_batch_end(3), 13);

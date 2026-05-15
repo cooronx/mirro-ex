@@ -28,7 +28,12 @@ async fn test_hell(config: &DbConfig) -> Result<()> {
 
     println!("db_pool_size={}", db_pool.size());
 
-    let query = SZOrderRangeQuery::new("2026-05-12", 1778549940000, 1778550000000);
+    let query = SZOrderRangeQuery::new(
+        "2026-05-12",
+        1778549940000,
+        1778550000000,
+        &config.tables.sz_order,
+    );
     let reader_build_start = Instant::now();
     let mut reader = ReplayDbReader::from_order_range_queries(
         db_pool.clone(),

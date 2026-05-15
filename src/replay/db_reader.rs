@@ -97,6 +97,7 @@ impl ReplayDbReader {
                             range.channel,
                             range.begin_message_number,
                             range.end_message_number,
+                            &query.table_name,
                         )
                     })
                     .map(ReaderCursor::new),
@@ -115,6 +116,7 @@ impl ReplayDbReader {
                             range.channel,
                             range.begin_message_number,
                             range.end_message_number,
+                            &query.table_name,
                         )
                     })
                     .map(ReaderCursor::new),
@@ -247,6 +249,7 @@ impl ReplayDbReader {
                     batch_spec.range.channel,
                     batch_spec.begin_message_number,
                     batch_spec.end_message_number,
+                    &batch_spec.range.table_name,
                 );
                 Ok(query_sh_orders_by_range(pool, &query).await?)
             }
@@ -256,6 +259,7 @@ impl ReplayDbReader {
                     batch_spec.range.channel,
                     batch_spec.begin_message_number,
                     batch_spec.end_message_number,
+                    &batch_spec.range.table_name,
                 );
                 Ok(query_sz_orders_by_range(pool, &query).await?)
             }
@@ -267,10 +271,10 @@ impl ReplayDbReader {
 #[cfg(test)]
 mod tests {
     use super::{FetchedBatch, ReplayDbReader};
+    use crate::config::{DbConfig, DbTableConfig};
     use crate::common::Market;
     use crate::db::dbpool::build_client;
     use crate::replay::reader_cursor::{ChannelRange, ReaderCursor};
-    use crate::config::DbConfig;
 
     fn test_pool() -> crate::db::dbpool::DbPool {
         let config = DbConfig {
@@ -279,6 +283,11 @@ mod tests {
             password: "password".to_string(),
             database: "db".to_string(),
             pool_size: 1,
+            tables: DbTableConfig {
+                sh_order: "sh_table".to_string(),
+                sz_order: "sz_table".to_string(),
+                transaction: "tx_table".to_string(),
+            },
         };
 
         crate::db::dbpool::DbPool::with_client(1, build_client(&config)).unwrap()
@@ -288,9 +297,9 @@ mod tests {
     async fn fetches_multiple_batches_and_advances_cursors() {
         let pool = test_pool();
         let cursors = vec![
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 15)),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 27)),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 30)),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 15, "unknown")),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 27, "unknown")),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 30, "unknown")),
         ];
         let mut reader = ReplayDbReader::new(pool, 3, cursors).unwrap();
 
@@ -327,9 +336,9 @@ mod tests {
     async fn continues_round_robin_across_calls() {
         let pool = test_pool();
         let cursors = vec![
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 14)),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 24)),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 34)),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 14, "unknown")),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 24, "unknown")),
+            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 34, "unknown")),
         ];
         let mut reader = ReplayDbReader::new(pool, 2, cursors).unwrap();
 

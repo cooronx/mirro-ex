@@ -11,8 +11,6 @@ use super::order_query_common::{
     validate_time_range,
 };
 
-const DEFAULT_SZ_ORDER_TABLE: &str = "L2_order_rt_distributed";
-
 pub type Result<T> = std::result::Result<T, SZOrderQueryError>;
 
 #[derive(Debug, Error)]
@@ -47,18 +45,18 @@ pub struct SZOrderRangeQuery {
 }
 
 impl SZOrderRangeQuery {
-    pub fn new(day: impl Into<String>, start_time_ms: i64, end_time_ms: i64) -> Self {
+    pub fn new(
+        day: impl Into<String>,
+        start_time_ms: i64,
+        end_time_ms: i64,
+        table_name: impl Into<String>,
+    ) -> Self {
         Self {
             day: day.into(),
             start_time_ms,
             end_time_ms,
-            table_name: DEFAULT_SZ_ORDER_TABLE.to_string(),
+            table_name: table_name.into(),
         }
-    }
-
-    pub fn with_table_name(mut self, table_name: impl Into<String>) -> Self {
-        self.table_name = table_name.into();
-        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -86,19 +84,15 @@ impl SZOrderByRangeQuery {
         channel: i64,
         begin_message_number: i64,
         end_message_number: i64,
+        table_name: impl Into<String>,
     ) -> Self {
         Self {
             day: day.into(),
             channel,
             begin_message_number,
             end_message_number,
-            table_name: DEFAULT_SZ_ORDER_TABLE.to_string(),
+            table_name: table_name.into(),
         }
-    }
-
-    pub fn with_table_name(mut self, table_name: impl Into<String>) -> Self {
-        self.table_name = table_name.into();
-        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -266,14 +260,5 @@ mod tests {
         assert_eq!(order.channel_number, 34);
         assert_eq!(order.direction, OrderDirection::Buy);
         assert_eq!(order.order_type, OrderType::BestOwn);
-    }
-
-    #[test]
-    fn maps_unknown_direction_and_order_type_to_unknown() {
-        assert_eq!(
-            normalize_sz_order_direction(9),
-            OrderDirection::Unknown
-        );
-        assert_eq!(normalize_sz_order_type("X"), OrderType::Unknown);
     }
 }

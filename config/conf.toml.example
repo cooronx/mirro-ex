@@ -4,3 +4,8 @@ user = "your_user"
 password = "your_password"
 database = "your_database"
 pool_size = 5
+
+[db.tables]
+sh_order = "L2_shorder_rt_distributed"
+sz_order = "L2_order_rt_distributed"
+transaction = "L2_transaction_rt_distributed"

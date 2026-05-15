@@ -18,6 +18,14 @@ pub struct DbConfig {
     pub password: String,
     pub database: String,
     pub pool_size: usize,
+    pub tables: DbTableConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbTableConfig {
+    pub sh_order: String,
+    pub sz_order: String,
+    pub transaction: String,
 }
 
 impl AppConfig {

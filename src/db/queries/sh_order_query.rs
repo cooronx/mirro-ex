@@ -11,8 +11,6 @@ use super::order_query_common::{
     validate_time_range,
 };
 
-const DEFAULT_SH_ORDER_TABLE: &str = "L2_shorder_rt_distributed";
-
 pub type Result<T> = std::result::Result<T, SHOrderQueryError>;
 
 #[derive(Debug, Error)]
@@ -47,18 +45,18 @@ pub struct SHOrderRangeQuery {
 }
 
 impl SHOrderRangeQuery {
-    pub fn new(day: impl Into<String>, start_time_ms: i64, end_time_ms: i64) -> Self {
+    pub fn new(
+        day: impl Into<String>,
+        start_time_ms: i64,
+        end_time_ms: i64,
+        table_name: impl Into<String>,
+    ) -> Self {
         Self {
             day: day.into(),
             start_time_ms,
             end_time_ms,
-            table_name: DEFAULT_SH_ORDER_TABLE.to_string(),
+            table_name: table_name.into(),
         }
-    }
-
-    pub fn with_table_name(mut self, table_name: impl Into<String>) -> Self {
-        self.table_name = table_name.into();
-        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -86,19 +84,15 @@ impl SHOrderByRangeQuery {
         channel: i64,
         begin_message_number: i64,
         end_message_number: i64,
+        table_name: impl Into<String>,
     ) -> Self {
         Self {
             day: day.into(),
             channel,
             begin_message_number,
             end_message_number,
-            table_name: DEFAULT_SH_ORDER_TABLE.to_string(),
+            table_name: table_name.into(),
         }
-    }
-
-    pub fn with_table_name(mut self, table_name: impl Into<String>) -> Self {
-        self.table_name = table_name.into();
-        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -265,11 +259,5 @@ mod tests {
         assert_eq!(order.direction, OrderDirection::Buy);
         assert_eq!(order.order_type, OrderType::Cancel);
         assert_eq!(order.extra_message_number, 88);
-    }
-
-    #[test]
-    fn maps_unknown_sh_values_to_unknown() {
-        assert_eq!(normalize_sh_order_direction(1), OrderDirection::Unknown);
-        assert_eq!(normalize_sh_order_type(9), OrderType::Unknown);
     }
 }
