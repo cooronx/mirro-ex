@@ -9,3 +9,7 @@ pool_size = 5
 sh_order = "L2_shorder_rt_distributed"
 sz_order = "L2_order_rt_distributed"
 transaction = "L2_transaction_rt_distributed"
+
+[replay]
+# 每个channel提前拉取多少个批次
+lane_queue_capacity = 8

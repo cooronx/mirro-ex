@@ -1,8 +1,15 @@
 use crate::common::Market;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDataKind {
+    Order,
+    Transaction,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRange {
     pub day: String,
+    pub data_kind: ReplayDataKind,
     pub market: Market,
     pub channel: i64,
     pub begin_message_number: i64,
@@ -13,6 +20,7 @@ pub struct ChannelRange {
 impl ChannelRange {
     pub fn new(
         day: impl Into<String>,
+        data_kind: ReplayDataKind,
         market: Market,
         channel: i64,
         begin_message_number: i64,
@@ -21,6 +29,7 @@ impl ChannelRange {
     ) -> Self {
         Self {
             day: day.into(),
+            data_kind,
             market,
             channel,
             begin_message_number,
@@ -73,12 +82,20 @@ impl ReaderCursor {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelRange, ReaderCursor};
+    use super::{ChannelRange, ReaderCursor, ReplayDataKind};
     use crate::common::Market;
 
     #[test]
     fn initializes_cursor_at_range_start() {
-        let range = ChannelRange::new("2026-05-12", Market::XSHG, 3, 100, 120, "sh_table");
+        let range = ChannelRange::new(
+            "2026-05-12",
+            ReplayDataKind::Order,
+            Market::XSHG,
+            3,
+            100,
+            120,
+            "sh_table",
+        );
         let cursor = ReaderCursor::new(range);
 
         assert_eq!(cursor.next_message_number, 100);
@@ -88,7 +105,15 @@ mod tests {
 
     #[test]
     fn advances_cursor_and_marks_finish() {
-        let range = ChannelRange::new("2026-05-12", Market::XSHE, 7, 10, 15, "sz_table");
+        let range = ChannelRange::new(
+            "2026-05-12",
+            ReplayDataKind::Order,
+            Market::XSHE,
+            7,
+            10,
+            15,
+            "sz_table",
+        );
         let mut cursor = ReaderCursor::new(range);
 
         assert_eq!(cursor.current_batch_end(3), 13);

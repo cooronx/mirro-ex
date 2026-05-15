@@ -1,7 +1,13 @@
+pub mod channel_replay_lane;
+pub mod coordinator;
 pub mod db_reader;
 pub mod event;
+pub mod producer;
 pub mod reader_cursor;
 
+pub use channel_replay_lane::{ChannelReplayLane, ChannelReplayLaneError};
+pub use coordinator::{ReplayCoordinator, ReplayCoordinatorError, ReplayTickResult};
 pub use db_reader::{FetchedBatch, ReplayDbReader, ReplayDbReaderError};
 pub use event::ReplayEvent;
-pub use reader_cursor::{ChannelRange, ReaderCursor};
+pub use producer::LaneProducerError;
+pub use reader_cursor::{ChannelRange, ReaderCursor, ReplayDataKind};

@@ -9,6 +9,7 @@ const DEFAULT_CONFIG_PATH: &str = "config/conf.toml";
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub db: DbConfig,
+    pub replay: ReplayConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -26,6 +27,11 @@ pub struct DbTableConfig {
     pub sh_order: String,
     pub sz_order: String,
     pub transaction: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ReplayConfig {
+    pub lane_queue_capacity: usize,
 }
 
 impl AppConfig {

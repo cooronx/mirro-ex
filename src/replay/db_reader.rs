@@ -11,9 +11,13 @@ use crate::db::queries::sz_order_query::{
     SZOrderByRangeQuery, SZOrderQueryError, SZOrderRangeQuery, query_sz_order_message_ranges,
     query_sz_orders_by_range,
 };
+use crate::db::queries::transaction_query::{
+    TransactionByRangeQuery, TransactionQueryError, TransactionRangeQuery,
+    query_transaction_message_ranges, query_transactions_by_range,
+};
 
 use super::event::ReplayEvent;
-use super::reader_cursor::{ChannelRange, ReaderCursor};
+use super::reader_cursor::{ChannelRange, ReaderCursor, ReplayDataKind};
 
 pub type Result<T> = std::result::Result<T, ReplayDbReaderError>;
 
@@ -27,12 +31,15 @@ pub enum ReplayDbReaderError {
     SHOrderQuery(#[from] SHOrderQueryError),
     #[error("sz order query failed")]
     SZOrderQuery(#[from] SZOrderQueryError),
+    #[error("transaction query failed")]
+    TransactionQuery(#[from] TransactionQueryError),
     #[error("failed to join replay batch task")]
     JoinTask(#[source] JoinError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedBatch {
+    pub data_kind: ReplayDataKind,
     pub market: Market,
     pub channel: i64,
     pub day: String,
@@ -83,6 +90,16 @@ impl ReplayDbReader {
         sh_query: Option<&SHOrderRangeQuery>,
         sz_query: Option<&SZOrderRangeQuery>,
     ) -> Result<Self> {
+        Self::from_range_queries(pool, batch_size, sh_query, sz_query, None).await
+    }
+
+    pub async fn from_range_queries(
+        pool: DbPool,
+        batch_size: i64,
+        sh_query: Option<&SHOrderRangeQuery>,
+        sz_query: Option<&SZOrderRangeQuery>,
+        transaction_query: Option<&TransactionRangeQuery>,
+    ) -> Result<Self> {
         let mut cursors = Vec::new();
 
         if let Some(query) = sh_query {
@@ -93,6 +110,7 @@ impl ReplayDbReader {
                     .map(|range| {
                         ChannelRange::new(
                             &query.day,
+                            ReplayDataKind::Order,
                             Market::XSHG,
                             range.channel,
                             range.begin_message_number,
@@ -112,7 +130,28 @@ impl ReplayDbReader {
                     .map(|range| {
                         ChannelRange::new(
                             &query.day,
+                            ReplayDataKind::Order,
                             Market::XSHE,
+                            range.channel,
+                            range.begin_message_number,
+                            range.end_message_number,
+                            &query.table_name,
+                        )
+                    })
+                    .map(ReaderCursor::new),
+            );
+        }
+
+        if let Some(query) = transaction_query {
+            let ranges = query_transaction_message_ranges(&pool, query).await?;
+            cursors.extend(
+                ranges
+                    .into_iter()
+                    .map(|range| {
+                        ChannelRange::new(
+                            &query.day,
+                            ReplayDataKind::Transaction,
+                            Market::Unknown,
                             range.channel,
                             range.begin_message_number,
                             range.end_message_number,
@@ -140,6 +179,25 @@ impl ReplayDbReader {
 
     pub fn has_unfinished(&self) -> bool {
         self.cursors.iter().any(|cursor| !cursor.finished)
+    }
+
+    pub fn into_parts(self) -> (DbPool, i64, Vec<ReaderCursor>) {
+        (self.pool, self.batch_size, self.cursors)
+    }
+
+    pub async fn fetch_batch_for_cursor(
+        pool: &DbPool,
+        batch_size: i64,
+        cursor: &ReaderCursor,
+    ) -> Result<FetchedBatch> {
+        let batch_spec = CursorBatchSpec {
+            cursor_index: 0,
+            range: cursor.range.clone(),
+            begin_message_number: cursor.next_message_number,
+            end_message_number: cursor.current_batch_end(batch_size),
+        };
+
+        Self::fetch_batch_for_spec(pool.clone(), batch_spec).await
     }
 
     pub async fn fetch_next_batches(&mut self, max_batches: usize) -> Result<Vec<FetchedBatch>> {
@@ -229,16 +287,36 @@ impl ReplayDbReader {
     }
 
     async fn fetch_batch_for_spec(pool: DbPool, batch_spec: CursorBatchSpec) -> Result<FetchedBatch> {
-        let orders = Self::fetch_orders_for_spec(&pool, &batch_spec).await?;
+        let events = Self::fetch_events_for_spec(&pool, &batch_spec).await?;
 
         Ok(FetchedBatch {
+            data_kind: batch_spec.range.data_kind,
             market: batch_spec.range.market,
             channel: batch_spec.range.channel,
             day: batch_spec.range.day.clone(),
             begin_message_number: batch_spec.begin_message_number,
             end_message_number: batch_spec.end_message_number,
-            events: orders.into_iter().map(ReplayEvent::Order).collect(),
+            events,
         })
+    }
+
+    async fn fetch_events_for_spec(
+        pool: &DbPool,
+        batch_spec: &CursorBatchSpec,
+    ) -> Result<Vec<ReplayEvent>> {
+        match batch_spec.range.data_kind {
+            ReplayDataKind::Order => {
+                let orders = Self::fetch_orders_for_spec(pool, batch_spec).await?;
+                Ok(orders.into_iter().map(ReplayEvent::Order).collect())
+            }
+            ReplayDataKind::Transaction => {
+                let transactions = Self::fetch_transactions_for_spec(pool, batch_spec).await?;
+                Ok(transactions
+                    .into_iter()
+                    .map(ReplayEvent::Transaction)
+                    .collect())
+            }
+        }
     }
 
     async fn fetch_orders_for_spec(pool: &DbPool, batch_spec: &CursorBatchSpec) -> Result<Vec<L2Order>> {
@@ -266,6 +344,20 @@ impl ReplayDbReader {
             Market::Unknown => Ok(Vec::new()),
         }
     }
+
+    async fn fetch_transactions_for_spec(
+        pool: &DbPool,
+        batch_spec: &CursorBatchSpec,
+    ) -> Result<Vec<crate::common::L2Transaction>> {
+        let query = TransactionByRangeQuery::new(
+            &batch_spec.range.day,
+            batch_spec.range.channel,
+            batch_spec.begin_message_number,
+            batch_spec.end_message_number,
+            &batch_spec.range.table_name,
+        );
+        Ok(query_transactions_by_range(pool, &query).await?)
+    }
 }
 
 #[cfg(test)]
@@ -274,7 +366,7 @@ mod tests {
     use crate::config::{DbConfig, DbTableConfig};
     use crate::common::Market;
     use crate::db::dbpool::build_client;
-    use crate::replay::reader_cursor::{ChannelRange, ReaderCursor};
+    use crate::replay::reader_cursor::{ChannelRange, ReaderCursor, ReplayDataKind};
 
     fn test_pool() -> crate::db::dbpool::DbPool {
         let config = DbConfig {
@@ -297,9 +389,33 @@ mod tests {
     async fn fetches_multiple_batches_and_advances_cursors() {
         let pool = test_pool();
         let cursors = vec![
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 15, "unknown")),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 27, "unknown")),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 30, "unknown")),
+            ReaderCursor::new(ChannelRange::new(
+                "2026-05-12",
+                ReplayDataKind::Order,
+                Market::Unknown,
+                1,
+                10,
+                15,
+                "unknown",
+            )),
+            ReaderCursor::new(ChannelRange::new(
+                "2026-05-12",
+                ReplayDataKind::Order,
+                Market::Unknown,
+                2,
+                20,
+                27,
+                "unknown",
+            )),
+            ReaderCursor::new(ChannelRange::new(
+                "2026-05-12",
+                ReplayDataKind::Order,
+                Market::Unknown,
+                3,
+                30,
+                30,
+                "unknown",
+            )),
         ];
         let mut reader = ReplayDbReader::new(pool, 3, cursors).unwrap();
 
@@ -309,6 +425,7 @@ mod tests {
             batches,
             vec![
                 FetchedBatch {
+                    data_kind: ReplayDataKind::Order,
                     market: Market::Unknown,
                     channel: 1,
                     day: "2026-05-12".to_string(),
@@ -317,6 +434,7 @@ mod tests {
                     events: Vec::new(),
                 },
                 FetchedBatch {
+                    data_kind: ReplayDataKind::Order,
                     market: Market::Unknown,
                     channel: 2,
                     day: "2026-05-12".to_string(),
@@ -336,9 +454,33 @@ mod tests {
     async fn continues_round_robin_across_calls() {
         let pool = test_pool();
         let cursors = vec![
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 1, 10, 14, "unknown")),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 2, 20, 24, "unknown")),
-            ReaderCursor::new(ChannelRange::new("2026-05-12", Market::Unknown, 3, 30, 34, "unknown")),
+            ReaderCursor::new(ChannelRange::new(
+                "2026-05-12",
+                ReplayDataKind::Order,
+                Market::Unknown,
+                1,
+                10,
+                14,
+                "unknown",
+            )),
+            ReaderCursor::new(ChannelRange::new(
+                "2026-05-12",
+                ReplayDataKind::Order,
+                Market::Unknown,
+                2,
+                20,
+                24,
+                "unknown",
+            )),
+            ReaderCursor::new(ChannelRange::new(
+                "2026-05-12",
+                ReplayDataKind::Order,
+                Market::Unknown,
+                3,
+                30,
+                34,
+                "unknown",
+            )),
         ];
         let mut reader = ReplayDbReader::new(pool, 2, cursors).unwrap();
 
