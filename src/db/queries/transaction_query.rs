@@ -119,6 +119,20 @@ impl TransactionByRangeQuery {
     }
 }
 
+/// 查询指定时间窗口内，逐笔成交数据在各个 channel 上的消息号范围。
+///
+/// # 参数
+/// - `pool`: ClickHouse 连接池，用于执行范围查询。
+/// - `query`: 查询条件，包含交易日、时间窗口以及表名。
+///
+/// # 返回
+/// - `Ok(Vec<ChannelMessageRange>)`: 每个活跃 channel 一条消息号范围记录，结果按 `channel` 升序返回。
+/// - `Err(TransactionQueryError)`: 查询参数非法、连接池取连接失败或 ClickHouse 查询失败时返回错误。
+///
+/// # 注意事项
+/// - 时间窗口语义为 `[start_time_ms, end_time_ms)`，也就是左闭右开。
+/// - 返回的 `ChannelMessageRange` 也采用半开区间 `[begin_message_number, end_message_number)`。
+/// - `end_message_number` 是排他上界，等于该 channel 在窗口内最后一条消息号加一，后续按批次读取时不会重复读取尾部消息。
 pub async fn query_transaction_message_ranges(
     pool: &DbPool,
     query: &TransactionRangeQuery,
@@ -158,6 +172,21 @@ pub async fn query_transaction_message_ranges(
         .collect()
 }
 
+/// 查询指定 message range 内，某个 channel 的逐笔成交明细。
+///
+/// # 参数
+/// - `pool`: ClickHouse 连接池，用于执行明细查询。
+/// - `query`: 查询条件，包含交易日、channel、消息号范围、表名以及可选的代码过滤列表。
+///
+/// # 返回
+/// - `Ok(Vec<L2Transaction>)`: 该 channel 在指定消息号范围内的逐笔成交明细，结果按 `transaction_number` 升序返回。
+/// - `Err(TransactionQueryError)`: 查询参数非法、连接池取连接失败或 ClickHouse 查询失败时返回错误。
+///
+/// # 注意事项
+/// - 消息号范围语义为 `[begin_message_number, end_message_number)`，也就是左闭右开。
+/// - 结果按 `transaction_number` 排序，适合直接用于后续按 channel 的顺序回放。
+/// - 如果设置了 `codes` 过滤条件，返回结果允许出现消息号缺口，但顺序保持不变。
+/// - 返回的 `L2Transaction.channel_number` 对应原始 `transaction_number` 字段。
 pub async fn query_transactions_by_range(
     pool: &DbPool,
     query: &TransactionByRangeQuery,

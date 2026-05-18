@@ -56,17 +56,18 @@ struct CursorBatchSpec {
     end_message_number: i64,
 }
 
+
+/// 数据库重放器
 #[derive(Clone)]
 pub struct ReplayDbReader {
     pool: DbPool,
     batch_size: i64,
     cursors: Vec<ReaderCursor>,
-    /**
-     * 下一个游标的序号
-     * 因为 max_batches 通常会小于 channel 数，如果每次就单纯的按顺序循环数组的话会出现总是只能拿到前几个channel
-     * 导致前几个channel被推进的非常快，而后面几个甚至有可能一直不推进
-     * 所以我们需要记录一下游标的序号，这样确保每一个channel都可以被正常循环读取到
-     */
+    /// 下一个游标的序号
+    /// 因为 max_batches 通常会小于 channel 数，如果每次就单纯的按顺序循环数组的话，会出现一种情况：只能拿到前几个channel
+    /// 导致前几个channel被推进的非常快，而后面几个甚至有可能一直不推进
+    /// 
+    /// 所以我们需要记录一下游标的序号，这样确保每一个channel都可以被正常循环读取到 (其实就是round-robin)
     next_cursor_index: usize,
 }
 

@@ -1,19 +1,35 @@
 use crate::common::Market;
 
+/// 回放数据类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayDataKind {
+    /// 逐笔委托
     Order,
+    /// 逐笔成交
     Transaction,
 }
 
+/// 单个数据源在一次回放窗口内的消息号范围。
+/// 
+/// 一个 `ChannelRange` 对应一条独立 source，通常由
+/// `day + data_kind + market + channel + table_name` 唯一确定。
+/// 
+/// 消息号范围统一采用半开区间 `[begin_message_number, end_message_number)`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRange {
+    /// 交易日，例如 `2026-05-12`。
     pub day: String,
+    /// 数据类型，区分逐笔委托和逐笔成交。
     pub data_kind: ReplayDataKind,
+    /// 市场；对于 transaction，初始阶段可能是 `Unknown`，后续再结合数据解析。
     pub market: Market,
+    /// 频道号。
     pub channel: i64,
+    /// 该 source 在本次回放窗口内的起始消息号（包含）。
     pub begin_message_number: i64,
+    /// 该 source 在本次回放窗口内的结束消息号（不包含）。
     pub end_message_number: i64,
+    /// 实际查询使用的 ClickHouse 表名。
     pub table_name: String,
 }
 
@@ -39,10 +55,14 @@ impl ChannelRange {
     }
 }
 
+/// source读取游标
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReaderCursor {
+    /// 读取范围
     pub range: ChannelRange,
+    /// 下一次该从哪里开始读取
     pub next_message_number: i64,
+    /// 是否已经结束
     pub finished: bool,
 }
 
