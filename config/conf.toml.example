@@ -13,3 +13,7 @@ transaction = "L2_transaction_rt_distributed"
 [replay]
 # 每个channel提前拉取多少个批次
 lane_queue_capacity = 8
+# 东八区时间，格式为 YYYY-MM-DD HH:MM:SS.sss
+replay_start_time = "2026-05-12 09:30:00.000"
+replay_end_time = "2026-05-12 09:31:00.000"
+replay_speed = 1.0

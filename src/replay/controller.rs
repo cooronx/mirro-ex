@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Error as AnyhowError;
+use chrono::{DateTime, FixedOffset, Utc};
 use thiserror::Error;
 use tokio::time::{Duration, MissedTickBehavior, interval};
 
@@ -18,7 +19,6 @@ use super::event::ReplayEvent;
 const DEFAULT_BATCH_SIZE: i64 = 1_000_000;
 const DEFAULT_TICK_INTERVAL_MS: u64 = 100;
 const DEFAULT_STALL_TICK_LIMIT: usize = 20;
-const ASIA_SHANGHAI_UTC_OFFSET_SECONDS: i64 = 8 * 60 * 60;
 
 pub type Result<T> = std::result::Result<T, ReplayControllerError>;
 
@@ -42,6 +42,9 @@ pub struct ReplayReport {
     pub total_events: usize,
     pub total_order_rows: usize,
     pub total_transaction_rows: usize,
+    pub max_lag_ms: u64,
+    pub avg_lag_ms: u64,
+    pub final_lag_ms: u64,
     pub reader_build_elapsed_ms: u128,
     pub bootstrap_elapsed_ms: u128,
     pub wall_elapsed_ms: u128,
@@ -58,12 +61,13 @@ pub struct PrintReplayHandler;
 
 impl ReplayHandler for PrintReplayHandler {
     fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()> {
-        for event in events {
-            match event {
-                ReplayEvent::Order(order) => println!("{order:?}"),
-                ReplayEvent::Transaction(transaction) => println!("{transaction:?}"),
-            }
-        }
+        // for event in events {
+        //     match event {
+        //         ReplayEvent::Order(order) => println!("{order:?}"),
+        //         ReplayEvent::Transaction(transaction) => println!("{transaction:?}"),
+        //     }
+        // }
+        println!("{}",events.len());
 
         Ok(())
     }
@@ -169,11 +173,17 @@ impl ReplayController {
         let mut total_events = 0usize;
         let mut total_order_rows = 0usize;
         let mut total_transaction_rows = 0usize;
+        let mut max_lag_ms = 0u64;
+        let mut total_lag_ms = 0u128;
+        let mut final_lag_ms = None;
         let mut consecutive_empty_ticks = 0usize;
         let stop_reason = loop {
             tick.tick().await;
             let result = coordinator.poll_ready_events().await?;
             tick_count += 1;
+            max_lag_ms = max_lag_ms.max(result.lag_ms);
+            total_lag_ms += u128::from(result.lag_ms);
+            final_lag_ms = Some(result.lag_ms);
 
             let (order_rows, transaction_rows) = count_event_rows(&result.events);
             total_events += result.events.len();
@@ -206,6 +216,9 @@ impl ReplayController {
             total_events,
             total_order_rows,
             total_transaction_rows,
+            max_lag_ms,
+            avg_lag_ms: average_lag_ms(total_lag_ms, tick_count),
+            final_lag_ms: final_lag_ms.unwrap_or(0),
             reader_build_elapsed_ms: reader_build_elapsed.as_millis(),
             bootstrap_elapsed_ms: bootstrap_elapsed.as_millis(),
             wall_elapsed_ms: run_start.elapsed().as_millis(),
@@ -229,6 +242,18 @@ fn count_event_rows(events: &[ReplayEvent]) -> (usize, usize) {
     (order_rows, transaction_rows)
 }
 
+fn average_lag_ms(total_lag_ms: u128, tick_count: usize) -> u64 {
+    if tick_count == 0 {
+        return 0;
+    }
+
+    (total_lag_ms / tick_count as u128) as u64
+}
+
+fn asia_shanghai_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 60 * 60).expect("Asia/Shanghai offset should be valid")
+}
+
 fn validate_request_and_resolve_day(request: &ReplayRequest) -> Result<String> {
     if request.start_time_ms >= request.end_time_ms {
         return Err(ReplayControllerError::InvalidTimeRange {
@@ -247,34 +272,20 @@ fn validate_request_and_resolve_day(request: &ReplayRequest) -> Result<String> {
 }
 
 fn trading_day_for_timestamp_ms(timestamp_ms: i64) -> String {
-    let local_seconds = timestamp_ms.div_euclid(1_000) + ASIA_SHANGHAI_UTC_OFFSET_SECONDS;
-    let local_days = local_seconds.div_euclid(86_400);
-    let (year, month, day) = civil_from_days(local_days);
+    let utc_datetime = DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
+        .expect("replay timestamp should fit in chrono DateTime");
 
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    if month <= 2 {
-        year += 1;
-    }
-
-    (year as i32, month as u32, day as u32)
+    utc_datetime
+        .with_timezone(&asia_shanghai_offset())
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        PrintReplayHandler, ReplayControllerError, ReplayHandler, ReplayRequest,
+        PrintReplayHandler, ReplayControllerError, ReplayHandler, ReplayReport, ReplayRequest,
+        ReplayStopReason, average_lag_ms,
         trading_day_for_timestamp_ms, validate_request_and_resolve_day,
     };
     use crate::common::{L2Order, Market, OrderDirection, OrderType};
