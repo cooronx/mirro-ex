@@ -16,21 +16,22 @@ pub type Result<T> = std::result::Result<T, TransactionQueryError>;
 pub enum TransactionQueryError {
     #[error("failed to acquire db client from pool")]
     AcquireClient(#[from] DbPoolError),
-    #[error("invalid transaction time range: start_time_ms={start_time_ms}, end_time_ms={end_time_ms}")]
+    #[error(
+        "invalid transaction time range: start_time_ms={start_time_ms}, end_time_ms={end_time_ms}"
+    )]
     InvalidTimeRange {
         start_time_ms: i64,
         end_time_ms: i64,
     },
-    #[error("invalid transaction message range: begin_message_number={begin_message_number}, end_message_number={end_message_number}")]
+    #[error(
+        "invalid transaction message range: begin_message_number={begin_message_number}, end_message_number={end_message_number}"
+    )]
     InvalidMessageRange {
         begin_message_number: i64,
         end_message_number: i64,
     },
     #[error("transaction message range overflow: channel={channel}, max_seq={max_seq}")]
-    MessageRangeOverflow {
-        channel: i64,
-        max_seq: i64,
-    },
+    MessageRangeOverflow { channel: i64, max_seq: i64 },
     #[error("failed to execute clickhouse transaction query")]
     Query(#[source] clickhouse::error::Error),
 }
@@ -59,12 +60,14 @@ impl TransactionRangeQuery {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_time_range(self.start_time_ms, self.end_time_ms, |start_time_ms, end_time_ms| {
-            TransactionQueryError::InvalidTimeRange {
+        validate_time_range(
+            self.start_time_ms,
+            self.end_time_ms,
+            |start_time_ms, end_time_ms| TransactionQueryError::InvalidTimeRange {
                 start_time_ms,
                 end_time_ms,
-            }
-        })
+            },
+        )
     }
 }
 
@@ -109,11 +112,9 @@ impl TransactionByRangeQuery {
         validate_message_range(
             self.begin_message_number,
             self.end_message_number,
-            |begin_message_number, end_message_number| {
-                TransactionQueryError::InvalidMessageRange {
-                    begin_message_number,
-                    end_message_number,
-                }
+            |begin_message_number, end_message_number| TransactionQueryError::InvalidMessageRange {
+                begin_message_number,
+                end_message_number,
             },
         )
     }

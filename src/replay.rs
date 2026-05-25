@@ -9,7 +9,7 @@ pub mod reader_cursor;
 pub use channel_replay_lane::{ChannelReplayLane, ChannelReplayLaneError};
 pub use controller::{
     PrintReplayHandler, ReplayController, ReplayControllerError, ReplayHandler, ReplayReport,
-    ReplayRequest, ReplayStopReason,
+    ReplayRequest, ReplayRunReport, ReplayStopReason,
 };
 pub use coordinator::{ReplayCoordinator, ReplayCoordinatorError, ReplayTickResult};
 pub use db_reader::{FetchedBatch, ReplayDbReader, ReplayDbReaderError};

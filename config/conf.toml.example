@@ -13,7 +13,12 @@ transaction = "L2_transaction_rt_distributed"
 [replay]
 # 每个channel提前拉取多少个批次
 lane_queue_capacity = 8
-# 东八区时间，格式为 YYYY-MM-DD HH:MM:SS.sss
-replay_start_time = "2026-05-12 09:30:00.000"
-replay_end_time = "2026-05-12 09:31:00.000"
+# 每次从数据库拉取多少条事件，越小越省内存，但查询次数会更多
+batch_size = 100000
+# 回放日期范围，格式为 YYYY-MM-DD
+replay_start_date = "2026-05-12"
+replay_end_date = "2026-05-12"
+# 每天的回放时段，按东八区本地时间解释，格式为 HH:MM:SS.sss
+replay_start_time = "09:30:00.000"
+replay_end_time = "09:31:00.000"
 replay_speed = 1.0

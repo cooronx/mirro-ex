@@ -15,41 +15,36 @@ pub enum ChannelReplayLaneError {
     #[error("channel replay lane must enable at least one data kind")]
     NoEnabledDataKind,
     #[error("fetched batch day mismatch: expected={expected}, actual={actual}")]
-    DayMismatch {
-        expected: String,
-        actual: String,
-    },
+    DayMismatch { expected: String, actual: String },
     #[error("fetched batch channel mismatch: expected={expected}, actual={actual}")]
-    ChannelMismatch {
-        expected: i64,
-        actual: i64,
-    },
+    ChannelMismatch { expected: i64, actual: i64 },
     #[error("fetched batch data kind is not enabled for this lane: data_kind={data_kind:?}")]
-    DisabledDataKind {
-        data_kind: ReplayDataKind,
-    },
-    #[error("fetched batch message range did not advance for {data_kind:?}: begin={begin_message_number}, previous_covered_until={previous_covered_until}")]
+    DisabledDataKind { data_kind: ReplayDataKind },
+    #[error(
+        "fetched batch message range did not advance for {data_kind:?}: begin={begin_message_number}, previous_covered_until={previous_covered_until}"
+    )]
     NonAdvancingRange {
         data_kind: ReplayDataKind,
         begin_message_number: i64,
         previous_covered_until: i64,
     },
     #[error("fetched batch contained mismatched event kind: expected={expected:?}")]
-    EventKindMismatch {
-        expected: ReplayDataKind,
-    },
-    #[error("fetched batch contained mismatched event channel: expected={expected}, actual={actual}")]
-    EventChannelMismatch {
-        expected: i64,
-        actual: i64,
-    },
-    #[error("fetched batch contained out-of-range message number: begin={begin_message_number}, end={end_message_number}, actual={actual}")]
+    EventKindMismatch { expected: ReplayDataKind },
+    #[error(
+        "fetched batch contained mismatched event channel: expected={expected}, actual={actual}"
+    )]
+    EventChannelMismatch { expected: i64, actual: i64 },
+    #[error(
+        "fetched batch contained out-of-range message number: begin={begin_message_number}, end={end_message_number}, actual={actual}"
+    )]
     EventOutsideBatchRange {
         begin_message_number: i64,
         end_message_number: i64,
         actual: i64,
     },
-    #[error("fetched batch message numbers are not strictly increasing for {data_kind:?}: previous={previous}, current={current}")]
+    #[error(
+        "fetched batch message numbers are not strictly increasing for {data_kind:?}: previous={previous}, current={current}"
+    )]
     NonMonotonicEvents {
         data_kind: ReplayDataKind,
         previous: i64,
@@ -152,7 +147,10 @@ impl ChannelReplayLane {
                 } else if self.transaction_finished {
                     self.order_covered_until
                 } else {
-                    Some(self.order_covered_until?.min(self.transaction_covered_until?))
+                    Some(
+                        self.order_covered_until?
+                            .min(self.transaction_covered_until?),
+                    )
                 }
             }
             (true, false) => self.order_covered_until,
@@ -167,6 +165,21 @@ impl ChannelReplayLane {
 
     pub fn transaction_buffer_len(&self) -> usize {
         self.transaction_buffer.len()
+    }
+
+    pub fn next_buffered_event_timestamp_ms(&self) -> Option<i64> {
+        match (self.order_buffer.front(), self.transaction_buffer.front()) {
+            (Some(order), Some(transaction)) => {
+                if order.channel_number < transaction.channel_number {
+                    Some(order.timestamp_ms)
+                } else {
+                    Some(transaction.timestamp_ms)
+                }
+            }
+            (Some(order), None) => Some(order.timestamp_ms),
+            (None, Some(transaction)) => Some(transaction.timestamp_ms),
+            (None, None) => None,
+        }
     }
 
     pub fn push_batch(&mut self, batch: FetchedBatch) -> Result<()> {
@@ -216,14 +229,17 @@ impl ChannelReplayLane {
             };
 
             let next_message_number = match next_kind {
-                ReplayDataKind::Order => self.order_buffer.front().map(|event| event.channel_number),
+                ReplayDataKind::Order => {
+                    self.order_buffer.front().map(|event| event.channel_number)
+                }
                 ReplayDataKind::Transaction => self
                     .transaction_buffer
                     .front()
                     .map(|event| event.channel_number),
             };
 
-            if next_message_number.is_none_or(|message_number| message_number >= safe_seq_exclusive) {
+            if next_message_number.is_none_or(|message_number| message_number >= safe_seq_exclusive)
+            {
                 break;
             }
 
@@ -394,7 +410,9 @@ impl ChannelReplayLane {
             });
         }
 
-        if actual_message_number < begin_message_number || actual_message_number >= end_message_number {
+        if actual_message_number < begin_message_number
+            || actual_message_number >= end_message_number
+        {
             return Err(ChannelReplayLaneError::EventOutsideBatchRange {
                 begin_message_number,
                 end_message_number,
@@ -420,8 +438,8 @@ impl ChannelReplayLane {
 mod tests {
     use super::ChannelReplayLane;
     use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
-    use crate::replay::{FetchedBatch, ReplayEvent};
     use crate::replay::reader_cursor::ReplayDataKind;
+    use crate::replay::{FetchedBatch, ReplayEvent};
 
     fn order_event(channel: i64, channel_number: i64, timestamp_ms: i64) -> ReplayEvent {
         ReplayEvent::Order(L2Order {
@@ -477,7 +495,10 @@ mod tests {
             day: "2026-05-12".to_string(),
             begin_message_number: 100,
             end_message_number: 110,
-            events: vec![transaction_event(3, 101, 1_001), transaction_event(3, 108, 1_008)],
+            events: vec![
+                transaction_event(3, 101, 1_001),
+                transaction_event(3, 108, 1_008),
+            ],
         })
         .unwrap();
 
@@ -504,7 +525,10 @@ mod tests {
             day: "2026-05-12".to_string(),
             begin_message_number: 200,
             end_message_number: 210,
-            events: vec![transaction_event(3, 201, 2_001), transaction_event(3, 208, 2_008)],
+            events: vec![
+                transaction_event(3, 201, 2_001),
+                transaction_event(3, 208, 2_008),
+            ],
         })
         .unwrap();
 
@@ -588,4 +612,5 @@ mod tests {
             .collect();
         assert_eq!(message_numbers_after_finish, vec![408]);
     }
+
 }

@@ -1,8 +1,10 @@
+use clickhouse::{Row, sql::Identifier};
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::task::JoinError;
 
 use crate::common::{L2Order, Market};
-use crate::db::dbpool::DbPool;
+use crate::db::dbpool::{DbPool, DbPoolError};
 use crate::db::queries::sh_order_query::{
     SHOrderByRangeQuery, SHOrderQueryError, SHOrderRangeQuery, query_sh_order_message_ranges,
     query_sh_orders_by_range,
@@ -27,6 +29,8 @@ pub enum ReplayDbReaderError {
     InvalidBatchSize,
     #[error("max_batches must be greater than 0")]
     InvalidMaxBatches,
+    #[error("failed to acquire db client from pool")]
+    AcquireClient(#[from] DbPoolError),
     #[error("sh order query failed")]
     SHOrderQuery(#[from] SHOrderQueryError),
     #[error("sz order query failed")]
@@ -56,6 +60,10 @@ struct CursorBatchSpec {
     end_message_number: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Row, Deserialize)]
+struct RawNextTimestamp {
+    timestamp_ms: i64,
+}
 
 /// 数据库重放器
 #[derive(Clone)]
@@ -66,7 +74,7 @@ pub struct ReplayDbReader {
     /// 下一个游标的序号
     /// 因为 max_batches 通常会小于 channel 数，如果每次就单纯的按顺序循环数组的话，会出现一种情况：只能拿到前几个channel
     /// 导致前几个channel被推进的非常快，而后面几个甚至有可能一直不推进
-    /// 
+    ///
     /// 所以我们需要记录一下游标的序号，这样确保每一个channel都可以被正常循环读取到 (其实就是round-robin)
     next_cursor_index: usize,
 }
@@ -111,6 +119,8 @@ impl ReplayDbReader {
                     .map(|range| {
                         ChannelRange::new(
                             &query.day,
+                            query.start_time_ms,
+                            query.end_time_ms,
                             ReplayDataKind::Order,
                             Market::XSHG,
                             range.channel,
@@ -131,6 +141,8 @@ impl ReplayDbReader {
                     .map(|range| {
                         ChannelRange::new(
                             &query.day,
+                            query.start_time_ms,
+                            query.end_time_ms,
                             ReplayDataKind::Order,
                             Market::XSHE,
                             range.channel,
@@ -151,6 +163,8 @@ impl ReplayDbReader {
                     .map(|range| {
                         ChannelRange::new(
                             &query.day,
+                            query.start_time_ms,
+                            query.end_time_ms,
                             ReplayDataKind::Transaction,
                             Market::Unknown,
                             range.channel,
@@ -199,6 +213,18 @@ impl ReplayDbReader {
         };
 
         Self::fetch_batch_for_spec(pool.clone(), batch_spec).await
+    }
+
+    pub async fn peek_next_event_timestamp_for_cursor(
+        pool: &DbPool,
+        cursor: &ReaderCursor,
+    ) -> Result<Option<i64>> {
+        match cursor.range.data_kind {
+            ReplayDataKind::Order => Self::peek_next_order_timestamp_for_cursor(pool, cursor).await,
+            ReplayDataKind::Transaction => {
+                Self::peek_next_transaction_timestamp_for_cursor(pool, cursor).await
+            }
+        }
     }
 
     pub async fn fetch_next_batches(&mut self, max_batches: usize) -> Result<Vec<FetchedBatch>> {
@@ -275,19 +301,17 @@ impl ReplayDbReader {
         (planned_batches, cursor_index)
     }
 
-    fn commit_batch_specs(
-        &mut self,
-        batch_specs: &[CursorBatchSpec],
-        next_cursor_index: usize,
-    ) {
+    fn commit_batch_specs(&mut self, batch_specs: &[CursorBatchSpec], next_cursor_index: usize) {
         for batch_spec in batch_specs {
-            self.cursors[batch_spec.cursor_index]
-                .advance_to(batch_spec.end_message_number);
+            self.cursors[batch_spec.cursor_index].advance_to(batch_spec.end_message_number);
         }
         self.next_cursor_index = next_cursor_index;
     }
 
-    async fn fetch_batch_for_spec(pool: DbPool, batch_spec: CursorBatchSpec) -> Result<FetchedBatch> {
+    async fn fetch_batch_for_spec(
+        pool: DbPool,
+        batch_spec: CursorBatchSpec,
+    ) -> Result<FetchedBatch> {
         let events = Self::fetch_events_for_spec(&pool, &batch_spec).await?;
 
         Ok(FetchedBatch {
@@ -320,7 +344,10 @@ impl ReplayDbReader {
         }
     }
 
-    async fn fetch_orders_for_spec(pool: &DbPool, batch_spec: &CursorBatchSpec) -> Result<Vec<L2Order>> {
+    async fn fetch_orders_for_spec(
+        pool: &DbPool,
+        batch_spec: &CursorBatchSpec,
+    ) -> Result<Vec<L2Order>> {
         match batch_spec.range.market {
             Market::XSHG => {
                 let query = SHOrderByRangeQuery::new(
@@ -359,13 +386,123 @@ impl ReplayDbReader {
         );
         Ok(query_transactions_by_range(pool, &query).await?)
     }
+
+    async fn peek_next_order_timestamp_for_cursor(
+        pool: &DbPool,
+        cursor: &ReaderCursor,
+    ) -> Result<Option<i64>> {
+        let client = pool.get_one().await?;
+
+        let rows = match cursor.range.market {
+            Market::XSHG => {
+                let sql = r#"
+                SELECT
+                    toUnixTimestamp64Milli(time) AS timestamp_ms
+                FROM ?
+                WHERE EventDate = toDate(?)
+                  AND time >= fromUnixTimestamp64Milli(?)
+                  AND time < fromUnixTimestamp64Milli(?)
+                  AND message_number >= ?
+                  AND message_number < ?
+                  AND channel = ?
+                ORDER BY message_number
+                LIMIT 1
+            "#;
+
+                client
+                    .query(sql)
+                    .bind(Identifier(&cursor.range.table_name))
+                    .bind(&cursor.range.day)
+                    .bind(cursor.range.start_time_ms)
+                    .bind(cursor.range.end_time_ms)
+                    .bind(cursor.next_message_number)
+                    .bind(cursor.range.end_message_number)
+                    .bind(cursor.range.channel)
+                    .fetch_all::<RawNextTimestamp>()
+                    .await
+                    .map_err(|err| {
+                        ReplayDbReaderError::SHOrderQuery(SHOrderQueryError::Query(err))
+                    })?
+            }
+            Market::XSHE => {
+                let sql = r#"
+                SELECT
+                    toUnixTimestamp64Milli(commision_time) AS timestamp_ms
+                FROM ?
+                WHERE EventDate = toDate(?)
+                  AND commision_time >= fromUnixTimestamp64Milli(?)
+                  AND commision_time < fromUnixTimestamp64Milli(?)
+                  AND message_number >= ?
+                  AND message_number < ?
+                  AND channel = ?
+                ORDER BY message_number
+                LIMIT 1
+            "#;
+
+                client
+                    .query(sql)
+                    .bind(Identifier(&cursor.range.table_name))
+                    .bind(&cursor.range.day)
+                    .bind(cursor.range.start_time_ms)
+                    .bind(cursor.range.end_time_ms)
+                    .bind(cursor.next_message_number)
+                    .bind(cursor.range.end_message_number)
+                    .bind(cursor.range.channel)
+                    .fetch_all::<RawNextTimestamp>()
+                    .await
+                    .map_err(|err| {
+                        ReplayDbReaderError::SZOrderQuery(SZOrderQueryError::Query(err))
+                    })?
+            }
+            Market::Unknown => return Ok(None),
+        };
+
+        Ok(rows.into_iter().next().map(|row| row.timestamp_ms))
+    }
+
+    async fn peek_next_transaction_timestamp_for_cursor(
+        pool: &DbPool,
+        cursor: &ReaderCursor,
+    ) -> Result<Option<i64>> {
+        let client = pool.get_one().await?;
+        let sql = r#"
+            SELECT
+                toUnixTimestamp64Milli(deal_time) AS timestamp_ms
+            FROM ?
+            WHERE EventDate = toDate(?)
+              AND deal_time >= fromUnixTimestamp64Milli(?)
+              AND deal_time < fromUnixTimestamp64Milli(?)
+              AND transaction_number >= ?
+              AND transaction_number < ?
+              AND channel_id = ?
+            ORDER BY transaction_number
+            LIMIT 1
+        "#;
+
+        let rows = client
+            .query(sql)
+            .bind(Identifier(&cursor.range.table_name))
+            .bind(&cursor.range.day)
+            .bind(cursor.range.start_time_ms)
+            .bind(cursor.range.end_time_ms)
+            .bind(cursor.next_message_number)
+            .bind(cursor.range.end_message_number)
+            .bind(cursor.range.channel)
+            .fetch_all::<RawNextTimestamp>()
+            .await
+            .map_err(|err| {
+                ReplayDbReaderError::TransactionQuery(TransactionQueryError::Query(err))
+            })?;
+
+        Ok(rows.into_iter().next().map(|row| row.timestamp_ms))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{FetchedBatch, ReplayDbReader};
-    use crate::config::{DbConfig, DbTableConfig};
     use crate::common::Market;
+    use crate::config::{DbConfig, DbTableConfig};
     use crate::db::dbpool::build_client;
     use crate::replay::reader_cursor::{ChannelRange, ReaderCursor, ReplayDataKind};
 
@@ -392,6 +529,8 @@ mod tests {
         let cursors = vec![
             ReaderCursor::new(ChannelRange::new(
                 "2026-05-12",
+                1_000,
+                2_000,
                 ReplayDataKind::Order,
                 Market::Unknown,
                 1,
@@ -401,6 +540,8 @@ mod tests {
             )),
             ReaderCursor::new(ChannelRange::new(
                 "2026-05-12",
+                1_000,
+                2_000,
                 ReplayDataKind::Order,
                 Market::Unknown,
                 2,
@@ -410,6 +551,8 @@ mod tests {
             )),
             ReaderCursor::new(ChannelRange::new(
                 "2026-05-12",
+                1_000,
+                2_000,
                 ReplayDataKind::Order,
                 Market::Unknown,
                 3,
@@ -457,6 +600,8 @@ mod tests {
         let cursors = vec![
             ReaderCursor::new(ChannelRange::new(
                 "2026-05-12",
+                1_000,
+                2_000,
                 ReplayDataKind::Order,
                 Market::Unknown,
                 1,
@@ -466,6 +611,8 @@ mod tests {
             )),
             ReaderCursor::new(ChannelRange::new(
                 "2026-05-12",
+                1_000,
+                2_000,
                 ReplayDataKind::Order,
                 Market::Unknown,
                 2,
@@ -475,6 +622,8 @@ mod tests {
             )),
             ReaderCursor::new(ChannelRange::new(
                 "2026-05-12",
+                1_000,
+                2_000,
                 ReplayDataKind::Order,
                 Market::Unknown,
                 3,

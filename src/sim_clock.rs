@@ -50,19 +50,18 @@ pub enum SimClockState {
     Finished,
 }
 
-
 /// # 模拟时钟
 /// 1. `start()`的时候，将当前真实时间写入real_anchor_time，将模拟时段的起点写入sim_anchor_ms
-/// 
+///
 /// 2. `now()`的时候，先判断状态是不是running，如果是就按照如下公式计算
 /// ```
 /// real_elapsed = Instant::now() - real_anchor_time
 /// sim_elapsed = real_elapsed * speed
 /// sim_now = sim_anchor_ms + sim_elapsed
 /// ```
-/// 
+///
 /// 3.如果 `pause()`，就先算一次当前 now，把它写回 sim_anchor_ms，然后清掉 real_anchor_time，状态改成 Paused
-/// 
+///
 /// 4.如果 `resume()`，就重新记一个新的 real_anchor_time = Instant::now()，但 sim_anchor_ms 不变，所以会从暂停点继续往前走。
 #[derive(Debug, Clone)]
 pub struct SimClock {

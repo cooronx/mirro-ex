@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Error as AnyhowError;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use thiserror::Error;
 use tokio::time::{Duration, MissedTickBehavior, interval};
 
@@ -16,23 +16,22 @@ use super::coordinator::{ReplayCoordinator, ReplayCoordinatorError};
 use super::db_reader::{ReplayDbReader, ReplayDbReaderError};
 use super::event::ReplayEvent;
 
-const DEFAULT_BATCH_SIZE: i64 = 1_000_000;
 const DEFAULT_TICK_INTERVAL_MS: u64 = 100;
-const DEFAULT_STALL_TICK_LIMIT: usize = 20;
 
 pub type Result<T> = std::result::Result<T, ReplayControllerError>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayRequest {
-    pub start_time_ms: i64,
-    pub end_time_ms: i64,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub start_time: NaiveTime,
+    pub end_time: NaiveTime,
     pub replay_speed: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayStopReason {
     Finished,
-    Stalled { frontier_lanes: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +51,29 @@ pub struct ReplayReport {
     pub stop_reason: ReplayStopReason,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayRunReport {
+    pub start_date: String,
+    pub end_date: String,
+    pub start_time: String,
+    pub end_time: String,
+    pub replay_speed: f64,
+    pub daily_reports: Vec<ReplayReport>,
+    pub skipped_days: Vec<String>,
+    pub ticks: usize,
+    pub total_events: usize,
+    pub total_order_rows: usize,
+    pub total_transaction_rows: usize,
+    pub max_lag_ms: u64,
+    pub avg_lag_ms: u64,
+    pub final_lag_ms: u64,
+    pub total_reader_build_elapsed_ms: u128,
+    pub total_bootstrap_elapsed_ms: u128,
+    pub total_wall_elapsed_ms: u128,
+    pub total_elapsed_ms: u128,
+    pub stop_reason: ReplayStopReason,
+}
+
 pub trait ReplayHandler {
     fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()>;
 }
@@ -60,30 +82,22 @@ pub trait ReplayHandler {
 pub struct PrintReplayHandler;
 
 impl ReplayHandler for PrintReplayHandler {
-    fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()> {
-        // for event in events {
-        //     match event {
-        //         ReplayEvent::Order(order) => println!("{order:?}"),
-        //         ReplayEvent::Transaction(transaction) => println!("{transaction:?}"),
-        //     }
-        // }
-        println!("{}",events.len());
-
+    fn on_events(&mut self, _events: &[ReplayEvent]) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
 #[derive(Debug, Error)]
 pub enum ReplayControllerError {
-    #[error("invalid replay time range: start_time_ms={start_time_ms}, end_time_ms={end_time_ms}")]
-    InvalidTimeRange {
-        start_time_ms: i64,
-        end_time_ms: i64,
+    #[error("invalid replay date range: start_date={start_date}, end_date={end_date}")]
+    InvalidDateRange {
+        start_date: String,
+        end_date: String,
     },
-    #[error("cross-day replay is not supported yet: start_day={start_day}, end_day={end_day}")]
-    CrossDayRequest {
-        start_day: String,
-        end_day: String,
+    #[error("invalid replay time range: start_time={start_time}, end_time={end_time}")]
+    InvalidTimeRange {
+        start_time: String,
+        end_time: String,
     },
     #[error("failed to build db pool")]
     DbPool(#[from] DbPoolError),
@@ -102,6 +116,24 @@ pub struct ReplayController {
     replay_config: ReplayConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DailyReplayWindow {
+    day: String,
+    start_time_ms: i64,
+    end_time_ms: i64,
+}
+
+enum SingleDayReplayOutcome {
+    Skipped {
+        day: String,
+        reader_build_elapsed_ms: u128,
+    },
+    Report {
+        report: ReplayReport,
+        total_lag_ms: u128,
+    },
+}
+
 impl ReplayController {
     pub fn new(db_config: DbConfig, replay_config: ReplayConfig) -> Self {
         Self {
@@ -110,37 +142,127 @@ impl ReplayController {
         }
     }
 
-    pub async fn replay<H>(&self, request: ReplayRequest, handler: &mut H) -> Result<ReplayReport>
+    pub async fn replay<H>(
+        &self,
+        request: ReplayRequest,
+        handler: &mut H,
+    ) -> Result<ReplayRunReport>
     where
         H: ReplayHandler,
     {
         let total_start = Instant::now();
-        let day = validate_request_and_resolve_day(&request)?;
+        validate_request(&request)?;
 
         let db_pool = DbPool::new(&self.db_config)?;
+        let daily_windows = split_request_into_daily_windows(&request);
+
+        let mut daily_reports = Vec::new();
+        let mut skipped_days = Vec::new();
+        let mut total_ticks = 0usize;
+        let mut total_events = 0usize;
+        let mut total_order_rows = 0usize;
+        let mut total_transaction_rows = 0usize;
+        let mut max_lag_ms = 0u64;
+        let mut total_lag_ms = 0u128;
+        let mut final_lag_ms = None;
+        let mut total_reader_build_elapsed_ms = 0u128;
+        let mut total_bootstrap_elapsed_ms = 0u128;
+        let mut total_wall_elapsed_ms = 0u128;
+
+        for daily_window in daily_windows {
+            match self
+                .replay_single_day(
+                    &db_pool,
+                    &daily_window,
+                    request.replay_speed,
+                    handler,
+                )
+                .await?
+            {
+                SingleDayReplayOutcome::Skipped {
+                    day,
+                    reader_build_elapsed_ms,
+                } => {
+                    skipped_days.push(day);
+                    total_reader_build_elapsed_ms += reader_build_elapsed_ms;
+                }
+                SingleDayReplayOutcome::Report {
+                    report,
+                    total_lag_ms: day_total_lag_ms,
+                } => {
+                    total_ticks += report.ticks;
+                    total_events += report.total_events;
+                    total_order_rows += report.total_order_rows;
+                    total_transaction_rows += report.total_transaction_rows;
+                    max_lag_ms = max_lag_ms.max(report.max_lag_ms);
+                    total_lag_ms += day_total_lag_ms;
+                    final_lag_ms = Some(report.final_lag_ms);
+                    total_reader_build_elapsed_ms += report.reader_build_elapsed_ms;
+                    total_bootstrap_elapsed_ms += report.bootstrap_elapsed_ms;
+                    total_wall_elapsed_ms += report.wall_elapsed_ms;
+
+                    daily_reports.push(report);
+                }
+            }
+        }
+
+        Ok(ReplayRunReport {
+            start_date: request.start_date.format("%Y-%m-%d").to_string(),
+            end_date: request.end_date.format("%Y-%m-%d").to_string(),
+            start_time: request.start_time.format("%H:%M:%S%.3f").to_string(),
+            end_time: request.end_time.format("%H:%M:%S%.3f").to_string(),
+            replay_speed: request.replay_speed,
+            daily_reports,
+            skipped_days,
+            ticks: total_ticks,
+            total_events,
+            total_order_rows,
+            total_transaction_rows,
+            max_lag_ms,
+            avg_lag_ms: average_lag_ms(total_lag_ms, total_ticks),
+            final_lag_ms: final_lag_ms.unwrap_or(0),
+            total_reader_build_elapsed_ms,
+            total_bootstrap_elapsed_ms,
+            total_wall_elapsed_ms,
+            total_elapsed_ms: total_start.elapsed().as_millis(),
+            stop_reason: ReplayStopReason::Finished,
+        })
+    }
+
+    async fn replay_single_day<H>(
+        &self,
+        db_pool: &DbPool,
+        daily_window: &DailyReplayWindow,
+        replay_speed: f64,
+        handler: &mut H,
+    ) -> Result<SingleDayReplayOutcome>
+    where
+        H: ReplayHandler,
+    {
+        let total_start = Instant::now();
         let sh_query = SHOrderRangeQuery::new(
-            &day,
-            request.start_time_ms,
-            request.end_time_ms,
+            &daily_window.day,
+            daily_window.start_time_ms,
+            daily_window.end_time_ms,
             &self.db_config.tables.sh_order,
         );
         let sz_query = SZOrderRangeQuery::new(
-            &day,
-            request.start_time_ms,
-            request.end_time_ms,
+            &daily_window.day,
+            daily_window.start_time_ms,
+            daily_window.end_time_ms,
             &self.db_config.tables.sz_order,
         );
         let transaction_query = TransactionRangeQuery::new(
-            &day,
-            request.start_time_ms,
-            request.end_time_ms,
+            &daily_window.day,
+            daily_window.start_time_ms,
+            daily_window.end_time_ms,
             &self.db_config.tables.transaction,
         );
 
         let reader_build_start = Instant::now();
         let reader = ReplayDbReader::from_range_queries(
-            db_pool,
-            DEFAULT_BATCH_SIZE,
+            db_pool.clone(),
+            self.replay_config.batch_size,
             Some(&sh_query),
             Some(&sz_query),
             Some(&transaction_query),
@@ -148,10 +270,17 @@ impl ReplayController {
         .await?;
         let reader_build_elapsed = reader_build_start.elapsed();
 
+        if reader.cursors().is_empty() {
+            return Ok(SingleDayReplayOutcome::Skipped {
+                day: daily_window.day.clone(),
+                reader_build_elapsed_ms: reader_build_elapsed.as_millis(),
+            });
+        }
+
         let clock = SimClock::new(
-            request.start_time_ms as u64,
-            request.end_time_ms as u64,
-            request.replay_speed,
+            daily_window.start_time_ms as u64,
+            daily_window.end_time_ms as u64,
+            replay_speed,
         )?;
         let mut coordinator = ReplayCoordinator::from_reader(
             reader,
@@ -176,8 +305,7 @@ impl ReplayController {
         let mut max_lag_ms = 0u64;
         let mut total_lag_ms = 0u128;
         let mut final_lag_ms = None;
-        let mut consecutive_empty_ticks = 0usize;
-        let stop_reason = loop {
+        loop {
             tick.tick().await;
             let result = coordinator.poll_ready_events().await?;
             tick_count += 1;
@@ -190,40 +318,34 @@ impl ReplayController {
             total_order_rows += order_rows;
             total_transaction_rows += transaction_rows;
 
-            if result.events.is_empty() {
-                consecutive_empty_ticks += 1;
-            } else {
-                consecutive_empty_ticks = 0;
+            if !result.events.is_empty() {
                 handler
                     .on_events(&result.events)
                     .map_err(ReplayControllerError::Handler)?;
             }
 
             if result.finished {
-                break ReplayStopReason::Finished;
+                break;
             }
+        }
 
-            if consecutive_empty_ticks >= DEFAULT_STALL_TICK_LIMIT {
-                break ReplayStopReason::Stalled {
-                    frontier_lanes: coordinator.debug_frontier_lanes(8),
-                };
-            }
-        };
-
-        Ok(ReplayReport {
-            day,
-            ticks: tick_count,
-            total_events,
-            total_order_rows,
-            total_transaction_rows,
-            max_lag_ms,
-            avg_lag_ms: average_lag_ms(total_lag_ms, tick_count),
-            final_lag_ms: final_lag_ms.unwrap_or(0),
-            reader_build_elapsed_ms: reader_build_elapsed.as_millis(),
-            bootstrap_elapsed_ms: bootstrap_elapsed.as_millis(),
-            wall_elapsed_ms: run_start.elapsed().as_millis(),
-            total_elapsed_ms: total_start.elapsed().as_millis(),
-            stop_reason,
+        Ok(SingleDayReplayOutcome::Report {
+            total_lag_ms,
+            report: ReplayReport {
+                day: daily_window.day.clone(),
+                ticks: tick_count,
+                total_events,
+                total_order_rows,
+                total_transaction_rows,
+                max_lag_ms,
+                avg_lag_ms: average_lag_ms(total_lag_ms, tick_count),
+                final_lag_ms: final_lag_ms.unwrap_or(0),
+                reader_build_elapsed_ms: reader_build_elapsed.as_millis(),
+                bootstrap_elapsed_ms: bootstrap_elapsed.as_millis(),
+                wall_elapsed_ms: run_start.elapsed().as_millis(),
+                total_elapsed_ms: total_start.elapsed().as_millis(),
+                stop_reason: ReplayStopReason::Finished,
+            },
         })
     }
 }
@@ -254,93 +376,98 @@ fn asia_shanghai_offset() -> FixedOffset {
     FixedOffset::east_opt(8 * 60 * 60).expect("Asia/Shanghai offset should be valid")
 }
 
-fn validate_request_and_resolve_day(request: &ReplayRequest) -> Result<String> {
-    if request.start_time_ms >= request.end_time_ms {
-        return Err(ReplayControllerError::InvalidTimeRange {
-            start_time_ms: request.start_time_ms,
-            end_time_ms: request.end_time_ms,
+fn validate_request(request: &ReplayRequest) -> Result<()> {
+    if request.start_date > request.end_date {
+        return Err(ReplayControllerError::InvalidDateRange {
+            start_date: request.start_date.format("%Y-%m-%d").to_string(),
+            end_date: request.end_date.format("%Y-%m-%d").to_string(),
         });
     }
 
-    let start_day = trading_day_for_timestamp_ms(request.start_time_ms);
-    let end_day = trading_day_for_timestamp_ms(request.end_time_ms - 1);
-    if start_day != end_day {
-        return Err(ReplayControllerError::CrossDayRequest { start_day, end_day });
+    if request.start_time >= request.end_time {
+        return Err(ReplayControllerError::InvalidTimeRange {
+            start_time: request.start_time.format("%H:%M:%S%.3f").to_string(),
+            end_time: request.end_time.format("%H:%M:%S%.3f").to_string(),
+        });
     }
 
-    Ok(start_day)
+    Ok(())
 }
 
-fn trading_day_for_timestamp_ms(timestamp_ms: i64) -> String {
-    let utc_datetime = DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
-        .expect("replay timestamp should fit in chrono DateTime");
+fn split_request_into_daily_windows(request: &ReplayRequest) -> Vec<DailyReplayWindow> {
+    let mut day = request.start_date;
+    let mut windows = Vec::new();
 
-    utc_datetime
-        .with_timezone(&asia_shanghai_offset())
-        .format("%Y-%m-%d")
-        .to_string()
+    loop {
+        windows.push(DailyReplayWindow {
+            day: day.format("%Y-%m-%d").to_string(),
+            start_time_ms: timestamp_ms_for_local_datetime(day, request.start_time),
+            end_time_ms: timestamp_ms_for_local_datetime(day, request.end_time),
+        });
+
+        if day == request.end_date {
+            break;
+        }
+
+        day = day
+            .succ_opt()
+            .expect("replay day should be able to advance to next day");
+    }
+
+    windows
+}
+
+fn timestamp_ms_for_local_datetime(day: NaiveDate, time: NaiveTime) -> i64 {
+    asia_shanghai_offset()
+        .from_local_datetime(&NaiveDateTime::new(day, time))
+        .single()
+        .expect("local replay datetime in Asia/Shanghai should be unambiguous")
+        .timestamp_millis()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        PrintReplayHandler, ReplayControllerError, ReplayHandler, ReplayReport, ReplayRequest,
-        ReplayStopReason, average_lag_ms,
-        trading_day_for_timestamp_ms, validate_request_and_resolve_day,
+        DailyReplayWindow, ReplayRequest, split_request_into_daily_windows,
+        timestamp_ms_for_local_datetime,
     };
-    use crate::common::{L2Order, Market, OrderDirection, OrderType};
-    use crate::replay::ReplayEvent;
+    use chrono::{NaiveDate, NaiveTime};
 
     #[test]
-    fn resolves_trading_day_from_unix_ms() {
+    fn resolves_east8_local_datetime_to_unix_ms() {
         assert_eq!(
-            trading_day_for_timestamp_ms(1_778_549_400_000),
-            "2026-05-12"
+            timestamp_ms_for_local_datetime(
+                NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
+                NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap()
+            ),
+            1_778_549_400_000
         );
     }
 
     #[test]
-    fn validates_same_day_request() {
+    fn splits_cross_day_request_into_daily_windows() {
         let request = ReplayRequest {
-            start_time_ms: 1_778_549_400_000,
-            end_time_ms: 1_778_549_460_000,
+            start_date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 5, 13).unwrap(),
+            start_time: NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap(),
+            end_time: NaiveTime::from_hms_milli_opt(15, 0, 0, 0).unwrap(),
             replay_speed: 1.0,
         };
 
         assert_eq!(
-            validate_request_and_resolve_day(&request).unwrap(),
-            "2026-05-12"
+            split_request_into_daily_windows(&request),
+            vec![
+                DailyReplayWindow {
+                    day: "2026-05-12".to_string(),
+                    start_time_ms: 1_778_549_400_000,
+                    end_time_ms: 1_778_569_200_000,
+                },
+                DailyReplayWindow {
+                    day: "2026-05-13".to_string(),
+                    start_time_ms: 1_778_635_800_000,
+                    end_time_ms: 1_778_655_600_000,
+                },
+            ]
         );
-    }
-
-    #[test]
-    fn rejects_cross_day_request() {
-        let request = ReplayRequest {
-            start_time_ms: 1_778_687_999_000,
-            end_time_ms: 1_778_688_001_000,
-            replay_speed: 1.0,
-        };
-
-        let err = validate_request_and_resolve_day(&request).unwrap_err();
-        assert!(matches!(err, ReplayControllerError::CrossDayRequest { .. }));
-    }
-
-    #[test]
-    fn print_handler_accepts_event_batch() {
-        let mut handler = PrintReplayHandler;
-        let events = vec![ReplayEvent::Order(L2Order {
-            market: Market::XSHG,
-            channel: 1,
-            channel_number: 1,
-            code: "SH600000".to_string(),
-            price: 100,
-            volume: 10,
-            direction: OrderDirection::Buy,
-            order_type: OrderType::Limit,
-            timestamp_ms: 1_000,
-            extra_message_number: 0,
-        })];
-
-        handler.on_events(&events).unwrap();
     }
 }

@@ -10,15 +10,19 @@ pub enum ReplayDataKind {
 }
 
 /// 单个数据源在一次回放窗口内的消息号范围。
-/// 
+///
 /// 一个 `ChannelRange` 对应一条独立 source，通常由
 /// `day + data_kind + market + channel + table_name` 唯一确定。
-/// 
+///
 /// 消息号范围统一采用半开区间 `[begin_message_number, end_message_number)`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRange {
     /// 交易日，例如 `2026-05-12`。
     pub day: String,
+    /// 本次回放窗口的起始时间戳（包含），单位毫秒。
+    pub start_time_ms: i64,
+    /// 本次回放窗口的结束时间戳（不包含），单位毫秒。
+    pub end_time_ms: i64,
     /// 数据类型，区分逐笔委托和逐笔成交。
     pub data_kind: ReplayDataKind,
     /// 市场；对于 transaction，初始阶段可能是 `Unknown`，后续再结合数据解析。
@@ -36,6 +40,8 @@ pub struct ChannelRange {
 impl ChannelRange {
     pub fn new(
         day: impl Into<String>,
+        start_time_ms: i64,
+        end_time_ms: i64,
         data_kind: ReplayDataKind,
         market: Market,
         channel: i64,
@@ -45,6 +51,8 @@ impl ChannelRange {
     ) -> Self {
         Self {
             day: day.into(),
+            start_time_ms,
+            end_time_ms,
             data_kind,
             market,
             channel,
@@ -109,6 +117,8 @@ mod tests {
     fn initializes_cursor_at_range_start() {
         let range = ChannelRange::new(
             "2026-05-12",
+            1_000,
+            2_000,
             ReplayDataKind::Order,
             Market::XSHG,
             3,
@@ -127,6 +137,8 @@ mod tests {
     fn advances_cursor_and_marks_finish() {
         let range = ChannelRange::new(
             "2026-05-12",
+            1_000,
+            2_000,
             ReplayDataKind::Order,
             Market::XSHE,
             7,

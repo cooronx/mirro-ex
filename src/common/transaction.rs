@@ -23,6 +23,7 @@ pub struct L2Transaction {
     pub buy_order_number: i64,
     /// 对应卖出order的channel_number (如果为撤单，则为0)
     pub sell_order_number: i64,
-    /// 交易所原始成交类型枚举值 (F = 成交，4 = 撤单，注意只对深交所有效，上交所的撤单是放在委托表里面的)
+    /// 交易所原始成交类型枚举值 (深交所: F = 成交，4 = 撤单，注意上交所的撤单是放在委托表里面的,上交所: B = 主动买入，S = 主动卖出，N = 未知)
+    /// 其实主动买入主动卖出的数据完全可以自己推算，也就是buy_order_number > sell_order_number ---> 主动买入,反之为主动卖出
     pub deal_type: String,
 }

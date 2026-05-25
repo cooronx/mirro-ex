@@ -23,7 +23,9 @@ pub enum LaneProducerError {
     Lane(#[from] ChannelReplayLaneError),
     #[error("ambiguous order lanes for transaction channel={channel}")]
     AmbiguousTransactionLane { channel: i64 },
-    #[error("duplicate source for lane market={market:?} channel={channel} data_kind={data_kind:?}")]
+    #[error(
+        "duplicate source for lane market={market:?} channel={channel} data_kind={data_kind:?}"
+    )]
     DuplicateSourceForLane {
         market: Market,
         channel: i64,
@@ -31,7 +33,9 @@ pub enum LaneProducerError {
     },
     #[error("transaction batch market could not be resolved for channel={channel}")]
     UnresolvedTransactionMarket { channel: i64 },
-    #[error("transaction batch contains inconsistent markets for channel={channel}: expected={expected:?}, actual={actual:?}")]
+    #[error(
+        "transaction batch contains inconsistent markets for channel={channel}: expected={expected:?}, actual={actual:?}"
+    )]
     InconsistentTransactionMarket {
         channel: i64,
         expected: Market,
@@ -76,6 +80,11 @@ pub enum LaneOutput {
     ReadyBatch {
         lane_key: LaneKey,
         events: Vec<ReplayEvent>,
+        watermark_ms: Option<i64>,
+    },
+    Progress {
+        lane_key: LaneKey,
+        watermark_ms: Option<i64>,
     },
     Finished {
         lane_key: LaneKey,
@@ -105,6 +114,7 @@ struct LaneProducer {
     transaction_cursor: Option<ReaderCursor>,
     pending_transaction_batch: Option<FetchedBatch>,
     sender: mpsc::Sender<LaneOutput>,
+    last_sent_watermark_ms: Option<i64>,
 }
 
 pub async fn spawn_lane_producers(
@@ -126,9 +136,16 @@ pub async fn spawn_lane_producers(
 
         tokio::spawn(async move {
             if let Err(err) = producer.run().await {
+                let mut error_chain = err.to_string();
+                let mut source = std::error::Error::source(&err);
+                while let Some(cause) = source {
+                    error_chain.push_str(": ");
+                    error_chain.push_str(&cause.to_string());
+                    source = cause.source();
+                }
                 eprintln!(
-                    "lane_producer_failed market={:?} channel={} error={}",
-                    lane_key.market, lane_key.channel, err
+                    "lane_producer_failed market={:?} channel={} error_chain={}",
+                    lane_key.market, lane_key.channel, error_chain
                 );
             }
         });
@@ -152,7 +169,10 @@ async fn build_lane_specs(
         match cursor.range.data_kind {
             ReplayDataKind::Order => {
                 let lane_key = LaneKey::new(cursor.range.market, cursor.range.channel);
-                if order_lane_by_channel.insert(cursor.range.channel, lane_key).is_some() {
+                if order_lane_by_channel
+                    .insert(cursor.range.channel, lane_key)
+                    .is_some()
+                {
                     return Err(LaneProducerError::AmbiguousTransactionLane {
                         channel: cursor.range.channel,
                     });
@@ -198,7 +218,8 @@ async fn build_lane_specs(
             continue;
         }
 
-        let initial_batch = ReplayDbReader::fetch_batch_for_cursor(pool, batch_size, &cursor).await?;
+        let initial_batch =
+            ReplayDbReader::fetch_batch_for_cursor(pool, batch_size, &cursor).await?;
         let market = resolve_transaction_batch_market(&initial_batch)?;
         let lane_key = LaneKey::new(market, cursor.range.channel);
         cursor.advance_to(initial_batch.end_message_number);
@@ -270,6 +291,7 @@ impl LaneProducer {
             transaction_cursor: spec.transaction_cursor,
             pending_transaction_batch: spec.initial_transaction_batch,
             sender,
+            last_sent_watermark_ms: None,
         })
     }
 
@@ -285,18 +307,16 @@ impl LaneProducer {
 
             self.sync_finished_markers();
             let ready_events = self.lane.pop_ready_events();
+            let last_ready_timestamp_ms = ready_events.last().map(ReplayEvent::timestamp_ms);
+            let watermark_ms = self
+                .compute_progress_watermark_ms(last_ready_timestamp_ms)
+                .await?;
             if !ready_events.is_empty() {
-                if self
-                    .sender
-                    .send(LaneOutput::ReadyBatch {
-                        lane_key: self.lane_key,
-                        events: ready_events,
-                    })
-                    .await
-                    .is_err()
-                {
+                if !self.send_ready_batch(ready_events, watermark_ms).await? {
                     return Ok(());
                 }
+            } else if !self.send_progress_if_advanced(watermark_ms).await? {
+                return Ok(());
             }
 
             if self.is_finished() {
@@ -312,7 +332,10 @@ impl LaneProducer {
     }
 
     fn select_next_fetch_kind(&self) -> Option<ReplayDataKind> {
-        let order_unfinished = self.order_cursor.as_ref().is_some_and(|cursor| !cursor.finished);
+        let order_unfinished = self
+            .order_cursor
+            .as_ref()
+            .is_some_and(|cursor| !cursor.finished);
         let transaction_unfinished = self
             .transaction_cursor
             .as_ref()
@@ -347,13 +370,14 @@ impl LaneProducer {
         }
         .expect("lane producer must have cursor for selected data kind");
 
-        let batch = ReplayDbReader::fetch_batch_for_cursor(&self.pool, self.batch_size, cursor).await?;
+        let batch =
+            ReplayDbReader::fetch_batch_for_cursor(&self.pool, self.batch_size, cursor).await?;
         cursor.advance_to(batch.end_message_number);
         self.ingest_batch(batch)
     }
 
     fn ingest_batch(&mut self, batch: FetchedBatch) -> Result<()> {
-        if batch.data_kind == ReplayDataKind::Transaction {
+        if batch.data_kind == ReplayDataKind::Transaction && !batch.events.is_empty() {
             let batch_market = resolve_transaction_batch_market(&batch)?;
             if batch_market != self.lane_key.market {
                 return Err(LaneProducerError::InconsistentTransactionMarket {
@@ -369,7 +393,12 @@ impl LaneProducer {
     }
 
     fn sync_finished_markers(&mut self) {
-        if self.order_cursor.as_ref().is_some_and(|cursor| cursor.finished) && !self.lane.order_finished() {
+        if self
+            .order_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.finished)
+            && !self.lane.order_finished()
+        {
             self.lane.mark_finished(ReplayDataKind::Order);
         }
 
@@ -384,7 +413,10 @@ impl LaneProducer {
     }
 
     fn is_finished(&self) -> bool {
-        let order_done = self.order_cursor.as_ref().is_none_or(|cursor| cursor.finished);
+        let order_done = self
+            .order_cursor
+            .as_ref()
+            .is_none_or(|cursor| cursor.finished);
         let transaction_done = self
             .transaction_cursor
             .as_ref()
@@ -395,5 +427,109 @@ impl LaneProducer {
             && self.pending_transaction_batch.is_none()
             && self.lane.order_buffer_len() == 0
             && self.lane.transaction_buffer_len() == 0
+    }
+
+    async fn send_ready_batch(
+        &mut self,
+        events: Vec<ReplayEvent>,
+        watermark_ms: Option<i64>,
+    ) -> Result<bool> {
+        if self
+            .sender
+            .send(LaneOutput::ReadyBatch {
+                lane_key: self.lane_key,
+                events,
+                watermark_ms,
+            })
+            .await
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        if let Some(watermark_ms) = watermark_ms {
+            self.last_sent_watermark_ms = Some(watermark_ms);
+        }
+
+        Ok(true)
+    }
+
+    async fn send_progress_if_advanced(&mut self, watermark_ms: Option<i64>) -> Result<bool> {
+        let Some(watermark_ms) = watermark_ms else {
+            return Ok(true);
+        };
+
+        if self
+            .last_sent_watermark_ms
+            .is_some_and(|last_sent_watermark_ms| watermark_ms <= last_sent_watermark_ms)
+        {
+            return Ok(true);
+        }
+
+        if self
+            .sender
+            .send(LaneOutput::Progress {
+                lane_key: self.lane_key,
+                watermark_ms: Some(watermark_ms),
+            })
+            .await
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        self.last_sent_watermark_ms = Some(watermark_ms);
+        Ok(true)
+    }
+
+    async fn compute_progress_watermark_ms(
+        &mut self,
+        last_ready_timestamp_ms: Option<i64>,
+    ) -> Result<Option<i64>> {
+        if let Some(buffered_timestamp_ms) = self.lane.next_buffered_event_timestamp_ms() {
+            return Ok(Some(buffered_timestamp_ms));
+        }
+
+        let next_future_timestamp_ms = self.peek_next_lane_timestamp_ms().await?;
+        self.sync_finished_markers();
+        Ok(next_future_timestamp_ms.or(last_ready_timestamp_ms))
+    }
+
+    async fn peek_next_lane_timestamp_ms(&mut self) -> Result<Option<i64>> {
+        let mut next_timestamp_ms: Option<i64> = None;
+
+        if let Some(cursor) = self.order_cursor.as_mut() {
+            if !cursor.finished {
+                let peeked_timestamp_ms =
+                    ReplayDbReader::peek_next_event_timestamp_for_cursor(&self.pool, cursor)
+                        .await?;
+                if peeked_timestamp_ms.is_none() {
+                    cursor.advance_to(cursor.range.end_message_number);
+                }
+                next_timestamp_ms = match (next_timestamp_ms, peeked_timestamp_ms) {
+                    (Some(current), Some(candidate)) => Some(current.min(candidate)),
+                    (None, Some(candidate)) => Some(candidate),
+                    (current, None) => current,
+                };
+            }
+        }
+
+        if let Some(cursor) = self.transaction_cursor.as_mut() {
+            if !cursor.finished {
+                let peeked_timestamp_ms =
+                    ReplayDbReader::peek_next_event_timestamp_for_cursor(&self.pool, cursor)
+                        .await?;
+                if peeked_timestamp_ms.is_none() {
+                    cursor.advance_to(cursor.range.end_message_number);
+                }
+                next_timestamp_ms = match (next_timestamp_ms, peeked_timestamp_ms) {
+                    (Some(current), Some(candidate)) => Some(current.min(candidate)),
+                    (None, Some(candidate)) => Some(candidate),
+                    (current, None) => current,
+                };
+            }
+        }
+
+        Ok(next_timestamp_ms)
     }
 }

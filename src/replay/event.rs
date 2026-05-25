@@ -1,6 +1,6 @@
-use crate::common::{L2Order, L2Transaction};
-use crate::common::Market;
 use super::reader_cursor::ReplayDataKind;
+use crate::common::Market;
+use crate::common::{L2Order, L2Transaction};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayEvent {

@@ -7,8 +7,7 @@ use crate::db::dbpool::{DbPool, DbPoolError};
 
 pub use super::order_query_common::ChannelMessageRange;
 use super::order_query_common::{
-    RawOrderMessageRange, build_message_range, validate_message_range,
-    validate_time_range,
+    RawOrderMessageRange, build_message_range, validate_message_range, validate_time_range,
 };
 
 pub type Result<T> = std::result::Result<T, SZOrderQueryError>;
@@ -17,21 +16,22 @@ pub type Result<T> = std::result::Result<T, SZOrderQueryError>;
 pub enum SZOrderQueryError {
     #[error("failed to acquire db client from pool")]
     AcquireClient(#[from] DbPoolError),
-    #[error("invalid shenzhen order time range: start_time_ms={start_time_ms}, end_time_ms={end_time_ms}")]
+    #[error(
+        "invalid shenzhen order time range: start_time_ms={start_time_ms}, end_time_ms={end_time_ms}"
+    )]
     InvalidTimeRange {
         start_time_ms: i64,
         end_time_ms: i64,
     },
-    #[error("invalid shenzhen order message range: begin_message_number={begin_message_number}, end_message_number={end_message_number}")]
+    #[error(
+        "invalid shenzhen order message range: begin_message_number={begin_message_number}, end_message_number={end_message_number}"
+    )]
     InvalidMessageRange {
         begin_message_number: i64,
         end_message_number: i64,
     },
     #[error("shenzhen order message range overflow: channel={channel}, max_seq={max_seq}")]
-    MessageRangeOverflow {
-        channel: i64,
-        max_seq: i64,
-    },
+    MessageRangeOverflow { channel: i64, max_seq: i64 },
     #[error("failed to execute clickhouse order query")]
     Query(#[source] clickhouse::error::Error),
 }
@@ -60,12 +60,14 @@ impl SZOrderRangeQuery {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_time_range(self.start_time_ms, self.end_time_ms, |start_time_ms, end_time_ms| {
-            SZOrderQueryError::InvalidTimeRange {
+        validate_time_range(
+            self.start_time_ms,
+            self.end_time_ms,
+            |start_time_ms, end_time_ms| SZOrderQueryError::InvalidTimeRange {
                 start_time_ms,
                 end_time_ms,
-            }
-        })
+            },
+        )
     }
 }
 
@@ -263,11 +265,7 @@ fn normalize_sz_order_type(order_type: &str) -> OrderType {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        RawSZOrder,
-        normalize_sz_order_direction,
-        normalize_sz_order_type,
-    };
+    use super::{RawSZOrder, normalize_sz_order_direction, normalize_sz_order_type};
     use crate::common::{Market, OrderDirection, OrderType};
 
     #[test]

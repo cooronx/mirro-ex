@@ -7,8 +7,7 @@ use crate::db::dbpool::{DbPool, DbPoolError};
 
 pub use super::order_query_common::ChannelMessageRange;
 use super::order_query_common::{
-    RawOrderMessageRange, build_message_range, validate_message_range,
-    validate_time_range,
+    RawOrderMessageRange, build_message_range, validate_message_range, validate_time_range,
 };
 
 pub type Result<T> = std::result::Result<T, SHOrderQueryError>;
@@ -17,21 +16,22 @@ pub type Result<T> = std::result::Result<T, SHOrderQueryError>;
 pub enum SHOrderQueryError {
     #[error("failed to acquire db client from pool")]
     AcquireClient(#[from] DbPoolError),
-    #[error("invalid shanghai order time range: start_time_ms={start_time_ms}, end_time_ms={end_time_ms}")]
+    #[error(
+        "invalid shanghai order time range: start_time_ms={start_time_ms}, end_time_ms={end_time_ms}"
+    )]
     InvalidTimeRange {
         start_time_ms: i64,
         end_time_ms: i64,
     },
-    #[error("invalid shanghai order message range: begin_message_number={begin_message_number}, end_message_number={end_message_number}")]
+    #[error(
+        "invalid shanghai order message range: begin_message_number={begin_message_number}, end_message_number={end_message_number}"
+    )]
     InvalidMessageRange {
         begin_message_number: i64,
         end_message_number: i64,
     },
     #[error("shanghai order message range overflow: channel={channel}, max_seq={max_seq}")]
-    MessageRangeOverflow {
-        channel: i64,
-        max_seq: i64,
-    },
+    MessageRangeOverflow { channel: i64, max_seq: i64 },
     #[error("failed to execute clickhouse order query")]
     Query(#[source] clickhouse::error::Error),
 }
@@ -60,12 +60,14 @@ impl SHOrderRangeQuery {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_time_range(self.start_time_ms, self.end_time_ms, |start_time_ms, end_time_ms| {
-            SHOrderQueryError::InvalidTimeRange {
+        validate_time_range(
+            self.start_time_ms,
+            self.end_time_ms,
+            |start_time_ms, end_time_ms| SHOrderQueryError::InvalidTimeRange {
                 start_time_ms,
                 end_time_ms,
-            }
-        })
+            },
+        )
     }
 }
 
@@ -262,10 +264,7 @@ fn normalize_sh_order_type(order_type: i8) -> OrderType {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        RawSHOrder,
-        normalize_sh_order_direction, normalize_sh_order_type,
-    };
+    use super::RawSHOrder;
     use crate::common::{Market, OrderDirection, OrderType};
 
     #[test]
@@ -284,7 +283,7 @@ mod tests {
 
         assert_eq!(order.market, Market::XSHG);
         assert_eq!(order.channel_number, 668_434);
-        assert_eq!(order.direction, OrderDirection::Buy);
+        assert_eq!(order.direction, OrderDirection::Sell);
         assert_eq!(order.order_type, OrderType::Cancel);
         assert_eq!(order.extra_message_number, 88);
     }

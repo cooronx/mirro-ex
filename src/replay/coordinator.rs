@@ -8,9 +8,7 @@ use crate::sim_clock::{SimClock, SimClockError};
 
 use super::db_reader::ReplayDbReader;
 use super::event::ReplayEvent;
-use super::producer::{
-    LaneKey, LaneOutput, LaneProducerError, LaneReceiver, spawn_lane_producers,
-};
+use super::producer::{LaneKey, LaneOutput, LaneProducerError, LaneReceiver, spawn_lane_producers};
 
 pub type Result<T> = std::result::Result<T, ReplayCoordinatorError>;
 
@@ -29,7 +27,9 @@ pub enum ReplayCoordinatorError {
         market: crate::common::Market,
         channel: i64,
     },
-    #[error("lane output key mismatch: expected market={expected_market:?} channel={expected_channel}, actual market={actual_market:?} channel={actual_channel}")]
+    #[error(
+        "lane output key mismatch: expected market={expected_market:?} channel={expected_channel}, actual market={actual_market:?} channel={actual_channel}"
+    )]
     LaneOutputKeyMismatch {
         expected_market: crate::common::Market,
         expected_channel: i64,
@@ -50,6 +50,7 @@ pub struct ReplayTickResult {
 struct LaneRuntime {
     receiver: tokio::sync::mpsc::Receiver<LaneOutput>,
     ready_events: VecDeque<ReplayEvent>,
+    watermark_ms: Option<i64>,
     warmed_up: bool,
     finished: bool,
 }
@@ -86,7 +87,11 @@ pub struct ReplayCoordinator {
 }
 
 impl ReplayCoordinator {
-    pub fn new(lane_receivers: Vec<LaneReceiver>, clock: SimClock, tick_interval_ms: u64) -> Result<Self> {
+    pub fn new(
+        lane_receivers: Vec<LaneReceiver>,
+        clock: SimClock,
+        tick_interval_ms: u64,
+    ) -> Result<Self> {
         if tick_interval_ms == 0 {
             return Err(ReplayCoordinatorError::InvalidTickInterval);
         }
@@ -99,6 +104,7 @@ impl ReplayCoordinator {
                     LaneRuntime {
                         receiver: lane_receiver.receiver,
                         ready_events: VecDeque::new(),
+                        watermark_ms: None,
                         warmed_up: false,
                         finished: false,
                     },
@@ -143,40 +149,6 @@ impl ReplayCoordinator {
         self.bootstrap_impl().await
     }
 
-    pub fn debug_frontier_lanes(&self, limit: usize) -> Vec<String> {
-        let mut frontier_lanes: Vec<(LaneKey, &LaneRuntime)> = self
-            .lanes
-            .iter()
-            .filter(|(_, lane_runtime)| !(lane_runtime.finished && lane_runtime.ready_events.is_empty()))
-            .map(|(lane_key, lane_runtime)| (*lane_key, lane_runtime))
-            .collect();
-
-        frontier_lanes.sort_by_key(|(lane_key, lane_runtime)| {
-            (
-                Self::lane_ready_time_upper_bound(lane_runtime).unwrap_or(i64::MIN),
-                lane_key.market_rank(),
-                lane_key.channel,
-            )
-        });
-
-        frontier_lanes
-            .into_iter()
-            .take(limit)
-            .map(|(lane_key, lane_runtime)| {
-                format!(
-                    "market={:?} channel={} warmed_up={} finished={} ready={} head_time_ms={:?} safe_time_ms={:?}",
-                    lane_key.market,
-                    lane_key.channel,
-                    lane_runtime.warmed_up,
-                    lane_runtime.finished,
-                    lane_runtime.ready_events.len(),
-                    lane_runtime.ready_events.front().map(ReplayEvent::timestamp_ms),
-                    Self::lane_ready_time_upper_bound(lane_runtime),
-                )
-            })
-            .collect()
-    }
-
     pub async fn poll_ready_events(&mut self) -> Result<ReplayTickResult> {
         if !self.clock_started {
             self.bootstrap_impl().await?;
@@ -218,7 +190,9 @@ impl ReplayCoordinator {
                 }
 
                 match lane_runtime.receiver.recv().await {
-                    Some(output) => Self::apply_lane_output_to_runtime(lane_runtime, lane_key, output)?,
+                    Some(output) => {
+                        Self::apply_lane_output_to_runtime(lane_runtime, lane_key, output)?
+                    }
                     None => {
                         return Err(ReplayCoordinatorError::LaneReceiverClosed {
                             market: lane_key.market,
@@ -244,7 +218,9 @@ impl ReplayCoordinator {
                     .get_mut(&lane_key)
                     .expect("lane must exist while draining outputs");
                 match lane_runtime.receiver.try_recv() {
-                    Ok(output) => Self::apply_lane_output_to_runtime(lane_runtime, lane_key, output)?,
+                    Ok(output) => {
+                        Self::apply_lane_output_to_runtime(lane_runtime, lane_key, output)?
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         if lane_runtime.finished {
@@ -268,9 +244,22 @@ impl ReplayCoordinator {
         output: LaneOutput,
     ) -> Result<()> {
         match output {
-            LaneOutput::ReadyBatch { lane_key, events } => {
+            LaneOutput::ReadyBatch {
+                lane_key,
+                events,
+                watermark_ms,
+            } => {
                 Self::validate_lane_key(expected_lane_key, lane_key)?;
                 lane_runtime.ready_events.extend(events);
+                lane_runtime.watermark_ms = watermark_ms;
+                lane_runtime.warmed_up = true;
+            }
+            LaneOutput::Progress {
+                lane_key,
+                watermark_ms,
+            } => {
+                Self::validate_lane_key(expected_lane_key, lane_key)?;
+                lane_runtime.watermark_ms = watermark_ms;
                 lane_runtime.warmed_up = true;
             }
             LaneOutput::Finished { lane_key } => {
@@ -304,7 +293,7 @@ impl ReplayCoordinator {
                 continue;
             }
 
-            let Some(upper_bound) = Self::lane_ready_time_upper_bound(lane_runtime) else {
+            let Some(upper_bound) = lane_runtime.watermark_ms else {
                 return self.last_emitted_timestamp_ms;
             };
 
@@ -315,13 +304,6 @@ impl ReplayCoordinator {
         }
 
         min_upper_bound.or(self.last_emitted_timestamp_ms)
-    }
-
-    fn lane_ready_time_upper_bound(lane_runtime: &LaneRuntime) -> Option<i64> {
-        lane_runtime
-            .ready_events
-            .back()
-            .map(ReplayEvent::timestamp_ms)
     }
 
     fn emit_events_until(&mut self, emit_until: Option<i64>) -> Vec<ReplayEvent> {
@@ -412,6 +394,7 @@ mod tests {
             .send(LaneOutput::ReadyBatch {
                 lane_key: lane_a,
                 events: vec![order_event(1, 10, 1_100)],
+                watermark_ms: Some(1_100),
             })
             .await
             .unwrap();
@@ -440,23 +423,33 @@ mod tests {
         coordinator.bootstrap().await.unwrap();
 
         assert!(coordinator.clock_started);
-        assert!(coordinator
-            .lanes
-            .values()
-            .all(|lane_runtime| lane_runtime.warmed_up));
+        assert!(
+            coordinator
+                .lanes
+                .values()
+                .all(|lane_runtime| lane_runtime.warmed_up)
+        );
     }
 
     #[test]
     fn emits_globally_sorted_events_from_lane_buffers() {
         let lane_a = LaneRuntime {
             receiver: mpsc::channel(1).1,
-            ready_events: VecDeque::from(vec![order_event(1, 10, 1_500), order_event(1, 11, 1_800)]),
+            ready_events: VecDeque::from(vec![
+                order_event(1, 10, 1_500),
+                order_event(1, 11, 1_800),
+            ]),
+            watermark_ms: Some(1_800),
             warmed_up: true,
             finished: false,
         };
         let lane_b = LaneRuntime {
             receiver: mpsc::channel(1).1,
-            ready_events: VecDeque::from(vec![order_event(2, 20, 1_500), order_event(2, 21, 1_600)]),
+            ready_events: VecDeque::from(vec![
+                order_event(2, 20, 1_500),
+                order_event(2, 21, 1_600),
+            ]),
+            watermark_ms: Some(1_600),
             warmed_up: true,
             finished: false,
         };
@@ -479,5 +472,118 @@ mod tests {
             .collect();
 
         assert_eq!(ordering, vec![(1_500, 10), (1_500, 20), (1_600, 21)]);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_accepts_progress_as_first_output() {
+        let (sender, receiver) = mpsc::channel(4);
+        let lane = LaneKey::new(Market::XSHG, 1);
+
+        sender
+            .send(LaneOutput::Progress {
+                lane_key: lane,
+                watermark_ms: Some(1_900),
+            })
+            .await
+            .unwrap();
+
+        let clock = SimClock::new(1_000, 2_000, 1.0).unwrap();
+        let mut coordinator = ReplayCoordinator::new(
+            vec![LaneReceiver {
+                lane_key: lane,
+                receiver,
+            }],
+            clock,
+            100,
+        )
+        .unwrap();
+
+        coordinator.bootstrap().await.unwrap();
+
+        let lane_runtime = coordinator.lanes.get(&lane).unwrap();
+        assert!(lane_runtime.warmed_up);
+        assert_eq!(lane_runtime.watermark_ms, Some(1_900));
+    }
+
+    #[tokio::test]
+    async fn drain_available_outputs_consumes_multiple_ready_batches_per_lane() {
+        let (sender, receiver) = mpsc::channel(4);
+        let lane = LaneKey::new(Market::XSHG, 1);
+
+        sender
+            .send(LaneOutput::ReadyBatch {
+                lane_key: lane,
+                events: vec![order_event(1, 10, 1_100)],
+                watermark_ms: Some(1_100),
+            })
+            .await
+            .unwrap();
+        sender
+            .send(LaneOutput::ReadyBatch {
+                lane_key: lane,
+                events: vec![order_event(1, 11, 1_200)],
+                watermark_ms: Some(1_200),
+            })
+            .await
+            .unwrap();
+
+        let mut coordinator = ReplayCoordinator {
+            clock: SimClock::new(1_000, 2_000, 1.0).unwrap(),
+            tick_interval_ms: 100,
+            lanes: BTreeMap::from([(
+                lane,
+                LaneRuntime {
+                    receiver,
+                    ready_events: VecDeque::new(),
+                    watermark_ms: None,
+                    warmed_up: true,
+                    finished: false,
+                },
+            )]),
+            clock_started: true,
+            last_emitted_timestamp_ms: None,
+        };
+
+        coordinator.drain_available_outputs().unwrap();
+        let lane_runtime = coordinator.lanes.get(&lane).unwrap();
+        assert_eq!(lane_runtime.ready_events.len(), 2);
+        assert_eq!(
+            coordinator
+                .lanes
+                .get(&lane)
+                .and_then(|lane_runtime| lane_runtime.watermark_ms),
+            Some(1_200)
+        );
+    }
+
+    #[test]
+    fn uses_lane_watermark_even_when_ready_queue_is_empty() {
+        let lane_a = LaneRuntime {
+            receiver: mpsc::channel(1).1,
+            ready_events: VecDeque::new(),
+            watermark_ms: Some(1_900),
+            warmed_up: true,
+            finished: false,
+        };
+        let lane_b = LaneRuntime {
+            receiver: mpsc::channel(1).1,
+            ready_events: VecDeque::from(vec![order_event(2, 20, 1_500)]),
+            watermark_ms: Some(2_000),
+            warmed_up: true,
+            finished: false,
+        };
+
+        let coordinator = ReplayCoordinator {
+            clock: SimClock::new(1_000, 2_000, 1.0).unwrap(),
+            tick_interval_ms: 100,
+            lanes: BTreeMap::from([
+                (LaneKey::new(Market::XSHG, 1), lane_a),
+                (LaneKey::new(Market::XSHG, 2), lane_b),
+            ]),
+            clock_started: true,
+            last_emitted_timestamp_ms: None,
+        };
+
+        assert_eq!(coordinator.compute_safe_emit_time(), Some(1_900));
     }
 }
