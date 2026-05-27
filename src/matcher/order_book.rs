@@ -130,37 +130,54 @@ impl OrderBook {
     }
 
     pub fn apply_transaction(&mut self, transaction: L2Transaction) -> Result<()> {
-        if Self::is_cancel_transaction(&transaction) {
-            if transaction.market != Market::XSHE {
-                return Err(OrderBookError::UnexpectedTransactionStreamCancel(
-                    transaction.market,
-                ));
-            }
-
-            self.cancel_transaction_orders(&transaction);
-            return Ok(());
-        }
-
         if transaction.volume <= 0 {
             return Err(OrderBookError::InvalidTransactionVolume(transaction.volume));
         }
 
-        match (transaction.market, transaction.deal_type.trim()) {
-            (Market::XSHG, "B") => {
-                if transaction.sell_order_number > 0 {
-                    self.reduce_order_if_present(transaction.sell_order_number, transaction.volume);
+        match transaction.market {
+            Market::XSHG => match transaction.deal_type.trim() {
+                "B" | "S" | "N" => {
+                    if transaction.buy_order_number > 0 {
+                        self.reduce_order_if_present(
+                            transaction.buy_order_number,
+                            transaction.volume,
+                        );
+                    }
+                    if transaction.sell_order_number > 0 {
+                        self.reduce_order_if_present(
+                            transaction.sell_order_number,
+                            transaction.volume,
+                        );
+                    }
                 }
-            }
-            (Market::XSHG, "S") => {
-                if transaction.buy_order_number > 0 {
-                    self.reduce_order_if_present(transaction.buy_order_number, transaction.volume);
+                _ => {
+                    return Err(OrderBookError::UnexpectedTransactionStreamCancel(
+                        Market::XSHG,
+                    ))
                 }
-            }
-            _ => {
+            },
+            Market::XSHE => match transaction.deal_type.trim() {
+                "4" => {
+                    self.cancel_transaction_orders(&transaction);
+                }
+                "F" => {
+                    if transaction.buy_order_number > 0 {
+                        self.reduce_order(transaction.buy_order_number, transaction.volume);
+                    }
+                    if transaction.sell_order_number > 0 {
+                        self.reduce_order(transaction.sell_order_number, transaction.volume);
+                    }
+                }
+                _ => {
+                    return Err(OrderBookError::UnexpectedTransactionStreamCancel(
+                        Market::XSHE,
+                    ))
+                }
+            },
+            Market::Unknown => {
                 if transaction.buy_order_number > 0 {
                     self.reduce_order(transaction.buy_order_number, transaction.volume);
                 }
-
                 if transaction.sell_order_number > 0 {
                     self.reduce_order(transaction.sell_order_number, transaction.volume);
                 }
@@ -290,7 +307,11 @@ impl OrderBook {
         let order_id = Self::order_id(&order);
         let mut order = order;
         let pending_cancel = self.pending_cancels.remove(&order_id).unwrap_or(0);
-        let pending_reduction = self.pending_reductions.remove(&order_id).unwrap_or(0);
+        let pending_reduction = if order.market == Market::XSHG {
+            0
+        } else {
+            self.pending_reductions.remove(&order_id).unwrap_or(0)
+        };
         let total_pending = pending_cancel.saturating_add(pending_reduction);
         if total_pending > 0 {
             if total_pending >= order.volume {
@@ -396,10 +417,6 @@ impl OrderBook {
         } else {
             i64::MAX
         }
-    }
-
-    fn is_cancel_transaction(transaction: &L2Transaction) -> bool {
-        transaction.deal_type.trim() == "4"
     }
 
     fn cancel_transaction_orders(&mut self, transaction: &L2Transaction) {
@@ -791,11 +808,6 @@ impl AuctionAwareOrderBook {
     }
 
     pub fn apply_transaction(&mut self, transaction: L2Transaction) -> Result<Option<i64>> {
-        if self.is_xshg_opening_auction_trade(&transaction) {
-            self.record_opening_auction_trade(&transaction)?;
-            return Ok(None);
-        }
-
         self.sync_phase_with_timestamp(transaction.timestamp_ms);
         self.book.apply_transaction(transaction.clone())?;
         Ok(Some(transaction.timestamp_ms))
@@ -845,40 +857,6 @@ impl AuctionAwareOrderBook {
 
     pub fn verify_invariants(&self) -> std::result::Result<(), String> {
         self.book.verify_invariants()
-    }
-
-    fn record_opening_auction_trade(&mut self, transaction: &L2Transaction) -> Result<()> {
-        self.phase = XshgOpeningAuctionPhase::AuctionExecuting;
-
-        match self.opening_auction.as_mut() {
-            Some(opening_auction) => {
-                if opening_auction.price != transaction.price {
-                    return Err(OrderBookError::InconsistentOpeningAuctionPrice {
-                        expected: opening_auction.price,
-                        actual: transaction.price,
-                    });
-                }
-                opening_auction.total_volume += transaction.volume;
-            }
-            None => {
-                self.opening_auction = Some(OpeningAuctionExecution {
-                    timestamp_ms: transaction.timestamp_ms,
-                    price: transaction.price,
-                    total_volume: transaction.volume,
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn is_xshg_opening_auction_trade(&self, transaction: &L2Transaction) -> bool {
-        transaction.market == Market::XSHG
-            && transaction.deal_type.trim() == "F"
-            && matches!(
-                Self::xshg_phase_for_timestamp(transaction.timestamp_ms),
-                XshgOpeningAuctionPhase::AuctionExecuting
-            )
     }
 
     fn sync_phase_with_timestamp(&mut self, timestamp_ms: i64) {
@@ -1149,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn xshg_buy_aggressor_trade_reduces_only_resting_sell_side() {
+    fn xshg_buy_aggressor_trade_reduces_both_sides() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
@@ -1160,12 +1138,12 @@ mod tests {
         book.apply_transaction(xshg_transaction(1, 2, 4, "B"))
             .unwrap();
 
-        assert_eq!(book.order_hash.get(&1).unwrap().volume, 10);
+        assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
         assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
     }
 
     #[test]
-    fn xshg_sell_aggressor_trade_reduces_only_resting_buy_side() {
+    fn xshg_sell_aggressor_trade_reduces_both_sides() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
@@ -1177,11 +1155,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
-        assert_eq!(book.order_hash.get(&2).unwrap().volume, 12);
+        assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
     }
 
     #[test]
-    fn xshg_active_side_missing_does_not_create_pending_reduction() {
+    fn xshg_missing_buy_side_still_reduces_present_sell_side() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 12))
@@ -1194,13 +1172,29 @@ mod tests {
     }
 
     #[test]
-    fn xshg_passive_side_missing_does_not_create_pending_reduction() {
+    fn xshg_missing_both_sides_does_not_create_pending_reduction() {
         let mut book = OrderBook::new();
 
         book.apply_transaction(xshg_transaction(1, 2, 4, "B"))
             .unwrap();
 
         assert!(book.pending_reductions.is_empty());
+    }
+
+    #[test]
+    fn xshg_n_trade_reduces_both_sides() {
+        let mut book = OrderBook::new();
+
+        book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
+            .unwrap();
+        book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 12))
+            .unwrap();
+
+        book.apply_transaction(xshg_transaction(1, 2, 4, "N"))
+            .unwrap();
+
+        assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
+        assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
     }
 
     #[test]
@@ -1268,6 +1262,25 @@ mod tests {
     fn pending_transaction_reduction_applies_to_late_arriving_order() {
         let mut book = OrderBook::new();
 
+        let mut tx = transaction(88, 0, 4);
+        tx.market = Market::XSHE;
+        tx.deal_type = "F".to_string();
+        book.apply_transaction(tx).unwrap();
+
+        let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
+        order.market = Market::XSHE;
+        order.extra_message_number = 88;
+        book.apply_order(order).unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert_eq!(snapshot.bids[0].total_qty, 6);
+        assert_eq!(snapshot.bids[0].order_count, 1);
+    }
+
+    #[test]
+    fn shanghai_late_arriving_order_ignores_pending_transaction_reduction() {
+        let mut book = OrderBook::new();
+
         book.apply_transaction(transaction(88, 0, 4)).unwrap();
 
         let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
@@ -1275,7 +1288,7 @@ mod tests {
         book.apply_order(order).unwrap();
 
         let snapshot = book.snapshot(10);
-        assert_eq!(snapshot.bids[0].total_qty, 6);
+        assert_eq!(snapshot.bids[0].total_qty, 10);
         assert_eq!(snapshot.bids[0].order_count, 1);
     }
 
@@ -1424,6 +1437,44 @@ mod tests {
         assert_eq!(book.best_ask_price(), Some(239_800));
         assert_eq!(snapshot.bids[0].total_qty, 200);
         assert_eq!(snapshot.asks[0].total_qty, 500);
+    }
+
+    #[test]
+    fn auction_aware_book_treats_n_deal_type_as_opening_trade() {
+        let mut book = AuctionAwareOrderBook::new();
+
+        book.apply_order(timed_limit_order(
+            1,
+            OrderDirection::Buy,
+            239_800,
+            1_000,
+            "09:24:59.000",
+        ))
+        .unwrap();
+        book.apply_order(timed_limit_order(
+            2,
+            OrderDirection::Sell,
+            239_800,
+            1_200,
+            "09:24:59.000",
+        ))
+        .unwrap();
+
+        let mut tx = timed_transaction(1, 2, 600, 239_800, "09:25:00.000");
+        tx.deal_type = "N".to_string();
+        assert_eq!(book.apply_transaction(tx).unwrap(), None);
+
+        assert_eq!(
+            book.flush_before_timestamp(timestamp_ms("09:25:00.100"))
+                .unwrap(),
+            Some(timestamp_ms("09:25:00.000"))
+        );
+
+        let snapshot = book.snapshot(10);
+        assert_eq!(book.best_bid_price(), Some(239_800));
+        assert_eq!(book.best_ask_price(), Some(239_800));
+        assert_eq!(snapshot.bids[0].total_qty, 400);
+        assert_eq!(snapshot.asks[0].total_qty, 600);
     }
 
     #[test]

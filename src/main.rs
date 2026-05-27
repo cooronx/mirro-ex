@@ -17,26 +17,37 @@ use crate::replay::{ReplayController, ReplayEvent, ReplayHandler, ReplayRequest}
 const DEBUG_TARGET_CODE: Option<&str> = Some("SH600410");
 const DEBUG_SNAPSHOT_DEPTH: usize = 10;
 const VERIFY_ORDER_BOOK_INVARIANTS: bool = false;
+const DEFAULT_AUDIT_START_MS: i64 = 1_778_721_900_000;
+const DEFAULT_AUDIT_END_MS: i64 = 1_778_722_200_000;
+
+#[derive(Clone, Copy)]
+struct OrderBookAuditConfig {
+    start_ms: i64,
+    end_ms: i64,
+}
 
 struct OrderBookDebugHandler {
     target_code: Option<String>,
     book: AuctionAwareOrderBook,
     snapshot_depth: usize,
     print_stats: bool,
-    pending_snapshot_second_ms: Option<i64>,
-    pending_snapshot: Option<OrderBookSnapshot>,
+    audit_config: Option<OrderBookAuditConfig>,
     matched_event_count: usize,
 }
 
 impl OrderBookDebugHandler {
-    fn new(target_code: Option<String>, snapshot_depth: usize, print_stats: bool) -> Self {
+    fn new(
+        target_code: Option<String>,
+        snapshot_depth: usize,
+        print_stats: bool,
+        audit_config: Option<OrderBookAuditConfig>,
+    ) -> Self {
         Self {
             target_code,
             book: AuctionAwareOrderBook::new(),
             snapshot_depth,
             print_stats,
-            pending_snapshot_second_ms: None,
-            pending_snapshot: None,
+            audit_config,
             matched_event_count: 0,
         }
     }
@@ -103,52 +114,92 @@ impl OrderBookDebugHandler {
             .join(" ")
     }
 
-    fn snapshot_second_ms(timestamp_ms: i64) -> i64 {
-        (timestamp_ms / 1000) * 1000
+    fn should_audit_event(&self, event: &ReplayEvent, target_code: &str) -> bool {
+        let Some(audit_config) = self.audit_config else {
+            return false;
+        };
+
+        let event_code = self.canonical_event_code(event);
+        let timestamp_ms = event.timestamp_ms();
+        event_code == target_code
+            && timestamp_ms >= audit_config.start_ms
+            && timestamp_ms < audit_config.end_ms
     }
 
     fn current_snapshot(&mut self) -> OrderBookSnapshot {
         self.book.snapshot(self.snapshot_depth)
     }
 
-    fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) {
-        let snapshot = self.current_snapshot();
-        let second_ms = Self::snapshot_second_ms(timestamp_ms);
-        match self.pending_snapshot_second_ms {
-            Some(pending_second_ms) if pending_second_ms == second_ms => {
-                self.pending_snapshot = Some(snapshot);
-            }
-            Some(_) => {
-                self.emit_pending_snapshot(code);
-                self.pending_snapshot_second_ms = Some(second_ms);
-                self.pending_snapshot = Some(snapshot);
-            }
-            None => {
-                self.pending_snapshot_second_ms = Some(second_ms);
-                self.pending_snapshot = Some(snapshot);
-            }
+    fn format_top_of_book(snapshot: &OrderBookSnapshot) -> String {
+        let bid = snapshot
+            .bids
+            .first()
+            .map(|level| format!("{:.4}:{}", level.price as f64 / 10000.0, level.total_qty))
+            .unwrap_or_else(|| "-".to_string());
+        let ask = snapshot
+            .asks
+            .first()
+            .map(|level| format!("{:.4}:{}", level.price as f64 / 10000.0, level.total_qty))
+            .unwrap_or_else(|| "-".to_string());
+        format!("bid1={bid} ask1={ask}")
+    }
+
+    fn format_event_brief(event: &ReplayEvent) -> String {
+        match event {
+            ReplayEvent::Order(order) => format!(
+                "type=order ts={} channel={} channel_number={} order_number={} order_type={:?} direction={:?} price={:.4} volume={}",
+                order.timestamp_ms,
+                order.channel,
+                order.channel_number,
+                order.extra_message_number,
+                order.order_type,
+                order.direction,
+                order.price as f64 / 10000.0,
+                order.volume
+            ),
+            ReplayEvent::Transaction(transaction) => format!(
+                "type=transaction ts={} channel={} channel_number={} buy_order_number={} sell_order_number={} deal_type={} price={:.4} volume={}",
+                transaction.timestamp_ms,
+                transaction.channel,
+                transaction.channel_number,
+                transaction.buy_order_number,
+                transaction.sell_order_number,
+                transaction.deal_type.trim(),
+                transaction.price as f64 / 10000.0,
+                transaction.volume
+            ),
         }
     }
 
-    fn emit_pending_snapshot(&mut self, code: &str) {
-        let (Some(second_ms), Some(snapshot)) = (
-            self.pending_snapshot_second_ms.take(),
-            self.pending_snapshot.take(),
-        ) else {
-            return;
-        };
+    fn log_audit_event(&mut self, target_code: &str, event: &ReplayEvent, stage: &str) {
+        let snapshot = self.current_snapshot();
+        let stats = self.book.stats();
+        println!(
+            "order_book_audit stage={} code={} {} {} live_orders={} stale_slots={} pending_cancels={} pending_reductions={}",
+            stage,
+            target_code,
+            Self::format_event_brief(event),
+            Self::format_top_of_book(&snapshot),
+            stats.live_orders,
+            stats.stale_slots,
+            stats.pending_cancels,
+            stats.pending_reductions,
+        );
+    }
 
+    fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) {
+        let snapshot = self.current_snapshot();
         let bid_levels = Self::format_side_levels(&snapshot.bids, "bid");
         let ask_levels = Self::format_side_levels(&snapshot.asks, "ask");
         println!(
             "order_book_snapshot ts={} code={} {} {}",
-            second_ms, code, bid_levels, ask_levels
+            timestamp_ms, code, bid_levels, ask_levels
         );
         if self.print_stats {
             let stats = self.book.stats();
             println!(
                 "order_book_stats ts={} code={} live_orders={} stale_slots={} bid_levels={} ask_levels={} bid_slots={} ask_slots={} pending_cancels={} pending_reductions={}",
-                second_ms,
+                timestamp_ms,
                 code,
                 stats.live_orders,
                 stats.stale_slots,
@@ -162,22 +213,10 @@ impl OrderBookDebugHandler {
         }
     }
 
-    fn flush_pending_snapshot_before(&mut self, next_timestamp_ms: i64, code: &str) {
-        let next_second_ms = Self::snapshot_second_ms(next_timestamp_ms);
-        if self
-            .pending_snapshot_second_ms
-            .is_some_and(|pending_second_ms| pending_second_ms < next_second_ms)
-        {
-            self.emit_pending_snapshot(code);
-        }
-    }
-
     fn flush_before_timestamp(&mut self, next_timestamp_ms: i64) -> anyhow::Result<()> {
         let Some(code) = self.target_code.clone() else {
             return Ok(());
         };
-
-        self.flush_pending_snapshot_before(next_timestamp_ms, &code);
 
         if let Some(snapshot_timestamp_ms) = self
             .book
@@ -185,7 +224,6 @@ impl OrderBookDebugHandler {
             .context("failed to flush opening auction before next timestamp")?
         {
             self.record_snapshot(snapshot_timestamp_ms, &code);
-            self.flush_pending_snapshot_before(next_timestamp_ms, &code);
         }
 
         Ok(())
@@ -203,7 +241,6 @@ impl OrderBookDebugHandler {
         {
             self.record_snapshot(snapshot_timestamp_ms, &code);
         }
-        self.emit_pending_snapshot(&code);
 
         Ok(())
     }
@@ -212,36 +249,42 @@ impl OrderBookDebugHandler {
 impl ReplayHandler for OrderBookDebugHandler {
     fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()> {
         for event in events {
-            self.flush_before_timestamp(event.timestamp_ms())?;
             let target_code = self.select_target_code(event);
+            self.flush_before_timestamp(event.timestamp_ms())?;
             let event_code = self.canonical_event_code(event);
             if event_code != target_code {
                 continue;
             }
+            let should_audit = self.should_audit_event(event, &target_code);
+            if should_audit {
+                self.log_audit_event(&target_code, event, "before");
+            }
 
-            let snapshot_timestamp_ms = match event {
+            match event {
                 ReplayEvent::Order(order) => {
                     if !Self::should_track_order(order) {
                         continue;
                     }
 
-                    self.book.apply_order(order.clone()).with_context(|| {
+                    let _ = self.book.apply_order(order.clone()).with_context(|| {
                         format!(
                             "failed to apply order for code={} channel={} channel_number={}",
                             order.code, order.channel, order.channel_number
                         )
-                    })?
+                    })?;
                 }
-                ReplayEvent::Transaction(transaction) => self
-                    .book
-                    .apply_transaction(transaction.clone())
-                    .with_context(|| {
-                        format!(
-                            "failed to apply transaction for code={} channel={} channel_number={}",
-                            transaction.code, transaction.channel, transaction.channel_number
-                        )
-                    })?,
-            };
+                ReplayEvent::Transaction(transaction) => {
+                    let _ = self
+                        .book
+                        .apply_transaction(transaction.clone())
+                        .with_context(|| {
+                            format!(
+                                "failed to apply transaction for code={} channel={} channel_number={}",
+                                transaction.code, transaction.channel, transaction.channel_number
+                            )
+                        })?;
+                }
+            }
             if VERIFY_ORDER_BOOK_INVARIANTS {
                 self.book.verify_invariants().map_err(|message| {
                     anyhow::anyhow!(
@@ -254,10 +297,11 @@ impl ReplayHandler for OrderBookDebugHandler {
                 })?;
             }
             self.matched_event_count += 1;
-
-            if let Some(snapshot_timestamp_ms) = snapshot_timestamp_ms {
-                self.record_snapshot(snapshot_timestamp_ms, &target_code);
+            if should_audit {
+                self.log_audit_event(&target_code, event, "after");
             }
+
+            self.record_snapshot(event.timestamp_ms(), &target_code);
         }
 
         Ok(())
@@ -275,10 +319,12 @@ async fn main() -> Result<()> {
         replay_speed: config.replay.replay_speed,
     };
     let controller = ReplayController::new(config.db, config.replay);
+    let audit_config = order_book_audit_config_from_env()?;
     let mut handler = OrderBookDebugHandler::new(
         DEBUG_TARGET_CODE.map(str::to_string),
         DEBUG_SNAPSHOT_DEPTH,
         env_flag("MIRRO_ORDER_BOOK_DIAGNOSTICS"),
+        audit_config,
     );
 
     let report = controller.replay(request, &mut handler).await?;
@@ -298,4 +344,31 @@ fn env_flag(key: &str) -> bool {
                 || value.eq_ignore_ascii_case("on")
         })
         .unwrap_or(false)
+}
+
+fn order_book_audit_config_from_env() -> Result<Option<OrderBookAuditConfig>> {
+    if !env_flag("MIRRO_ORDER_BOOK_AUDIT") {
+        return Ok(None);
+    }
+
+    let start_ms = env::var("MIRRO_ORDER_BOOK_AUDIT_START_MS")
+        .ok()
+        .map(|value| {
+            value.parse::<i64>().with_context(|| {
+                format!("failed to parse MIRRO_ORDER_BOOK_AUDIT_START_MS as i64: {value}")
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_AUDIT_START_MS);
+    let end_ms = env::var("MIRRO_ORDER_BOOK_AUDIT_END_MS")
+        .ok()
+        .map(|value| {
+            value.parse::<i64>().with_context(|| {
+                format!("failed to parse MIRRO_ORDER_BOOK_AUDIT_END_MS as i64: {value}")
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_AUDIT_END_MS);
+
+    Ok(Some(OrderBookAuditConfig { start_ms, end_ms }))
 }
