@@ -403,7 +403,7 @@ mod tests {
             .await
             .unwrap();
 
-        let clock = SimClock::new(1_000, 2_000, 1.0).unwrap();
+        let clock = SimClock::new(1_000, 2_000, 1.0, false).unwrap();
         let mut coordinator = ReplayCoordinator::new(
             vec![
                 LaneReceiver {
@@ -455,7 +455,7 @@ mod tests {
         };
 
         let mut coordinator = ReplayCoordinator {
-            clock: SimClock::new(1_000, 2_000, 1.0).unwrap(),
+            clock: SimClock::new(1_000, 2_000, 1.0, false).unwrap(),
             tick_interval_ms: 100,
             lanes: BTreeMap::from([
                 (LaneKey::new(Market::XSHG, 1), lane_a),
@@ -487,7 +487,7 @@ mod tests {
             .await
             .unwrap();
 
-        let clock = SimClock::new(1_000, 2_000, 1.0).unwrap();
+        let clock = SimClock::new(1_000, 2_000, 1.0, false).unwrap();
         let mut coordinator = ReplayCoordinator::new(
             vec![LaneReceiver {
                 lane_key: lane,
@@ -528,7 +528,7 @@ mod tests {
             .unwrap();
 
         let mut coordinator = ReplayCoordinator {
-            clock: SimClock::new(1_000, 2_000, 1.0).unwrap(),
+            clock: SimClock::new(1_000, 2_000, 1.0, false).unwrap(),
             tick_interval_ms: 100,
             lanes: BTreeMap::from([(
                 lane,
@@ -574,7 +574,7 @@ mod tests {
         };
 
         let coordinator = ReplayCoordinator {
-            clock: SimClock::new(1_000, 2_000, 1.0).unwrap(),
+            clock: SimClock::new(1_000, 2_000, 1.0, false).unwrap(),
             tick_interval_ms: 100,
             lanes: BTreeMap::from([
                 (LaneKey::new(Market::XSHG, 1), lane_a),

@@ -287,6 +287,7 @@ impl ReplayController {
             daily_window.start_time_ms as u64,
             daily_window.end_time_ms as u64,
             replay_speed,
+            self.replay_config.skip_intraday_breaks,
         )?;
         let mut coordinator = ReplayCoordinator::from_reader(
             reader,
@@ -460,6 +461,7 @@ mod tests {
             replay_start_time: NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap(),
             replay_end_time: NaiveTime::from_hms_milli_opt(15, 0, 0, 0).unwrap(),
             replay_codes: None,
+            skip_intraday_breaks: false,
             replay_speed: 1.0,
         };
 

@@ -48,6 +48,8 @@ pub struct ReplayConfig {
     #[serde(deserialize_with = "deserialize_replay_time")]
     pub replay_end_time: NaiveTime,
     pub replay_codes: Option<Vec<String>>,
+    #[serde(default)]
+    pub skip_intraday_breaks: bool,
     #[serde(default = "default_replay_speed")]
     pub replay_speed: f64,
 }
@@ -140,5 +142,6 @@ replay_end_time = "09:31:00.000"
         let config: AppConfig = toml::from_str(raw).unwrap();
 
         assert_eq!(config.replay.batch_size, 100_000);
+        assert!(!config.replay.skip_intraday_breaks);
     }
 }
