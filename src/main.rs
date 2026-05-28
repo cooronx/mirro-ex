@@ -5,7 +5,10 @@ mod matcher;
 mod replay;
 mod sim_clock;
 
+use std::fs::{self, File};
+
 use anyhow::{Context, Result};
+use csv::Writer;
 
 use crate::common::{L2Order, Market, OrderType};
 use crate::config::AppConfig;
@@ -19,14 +22,16 @@ struct OrderBookSnapshotHandler {
     target_code: Option<String>,
     book: OrderBook,
     snapshot_depth: usize,
+    writer: Writer<File>,
 }
 
 impl OrderBookSnapshotHandler {
-    fn new(target_code: Option<String>, snapshot_depth: usize) -> Self {
+    fn new(target_code: Option<String>, snapshot_depth: usize, writer: Writer<File>) -> Self {
         Self {
             target_code,
             book: OrderBook::new(),
             snapshot_depth,
+            writer,
         }
     }
 
@@ -68,37 +73,38 @@ impl OrderBookSnapshotHandler {
             .expect("target code should be initialized")
     }
 
-    fn format_side_levels(levels: &[LevelSnapshot], prefix: &str) -> String {
-        (0..5)
-            .map(|index| {
-                if let Some(level) = levels.get(index) {
-                    format!(
-                        "{}{}={}:{}",
-                        prefix,
-                        index + 1,
-                        level.price as f64 / 10000.0,
-                        level.total_qty
-                    )
-                } else {
-                    format!("{}{}=-", prefix, index + 1)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+    fn level_cell(levels: &[LevelSnapshot], index: usize) -> String {
+        levels
+            .get(index)
+            .map(|level| format!("{:.4}:{}", level.price as f64 / 10000.0, level.total_qty))
+            .unwrap_or_default()
     }
 
     fn current_snapshot(&mut self) -> OrderBookSnapshot {
         self.book.snapshot(self.snapshot_depth)
     }
 
-    fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) {
+    fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) -> anyhow::Result<()> {
         let snapshot = self.current_snapshot();
-        let bid_levels = Self::format_side_levels(&snapshot.bids, "bid");
-        let ask_levels = Self::format_side_levels(&snapshot.asks, "ask");
-        println!(
-            "order_book_snapshot ts={} code={} {} {}",
-            timestamp_ms, code, bid_levels, ask_levels
-        );
+        let mut row = vec![timestamp_ms.to_string(), code.to_string()];
+        for index in 0..5 {
+            row.push(Self::level_cell(&snapshot.bids, index));
+        }
+        for index in 0..5 {
+            row.push(Self::level_cell(&snapshot.asks, index));
+        }
+
+        self.writer
+            .write_record(&row)
+            .context("failed to write order book snapshot csv row")?;
+
+        Ok(())
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        self.writer
+            .flush()
+            .context("failed to flush order book snapshot csv writer")
     }
 }
 
@@ -135,7 +141,7 @@ impl ReplayHandler for OrderBookSnapshotHandler {
                 }
             }
 
-            self.record_snapshot(event.timestamp_ms(), &target_code);
+            self.record_snapshot(event.timestamp_ms(), &target_code)?;
         }
 
         Ok(())
@@ -144,11 +150,26 @@ impl ReplayHandler for OrderBookSnapshotHandler {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    fs::create_dir_all("data").context("failed to create data directory")?;
+    let output_file =
+        File::create("data/order_book_snapshot.csv").context("failed to create output csv")?;
+    let mut writer = Writer::from_writer(output_file);
+    writer
+        .write_record([
+            "ts", "code", "bid1", "bid2", "bid3", "bid4", "bid5", "ask1", "ask2", "ask3", "ask4",
+            "ask5",
+        ])
+        .context("failed to write csv header")?;
+
     let config = AppConfig::load()?;
     let controller = ReplayController::new(config.db, config.replay);
-    let mut handler =
-        OrderBookSnapshotHandler::new(DEBUG_TARGET_CODE.map(str::to_string), DEBUG_SNAPSHOT_DEPTH);
+    let mut handler = OrderBookSnapshotHandler::new(
+        DEBUG_TARGET_CODE.map(str::to_string),
+        DEBUG_SNAPSHOT_DEPTH,
+        writer,
+    );
 
     controller.replay(&mut handler).await?;
+    handler.flush()?;
     Ok(())
 }

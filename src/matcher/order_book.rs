@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
