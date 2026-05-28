@@ -126,6 +126,7 @@ impl ReplayDbReader {
                             range.channel,
                             range.begin_message_number,
                             range.end_message_number,
+                            query.codes.clone(),
                             &query.table_name,
                         )
                     })
@@ -148,6 +149,7 @@ impl ReplayDbReader {
                             range.channel,
                             range.begin_message_number,
                             range.end_message_number,
+                            query.codes.clone(),
                             &query.table_name,
                         )
                     })
@@ -170,6 +172,7 @@ impl ReplayDbReader {
                             range.channel,
                             range.begin_message_number,
                             range.end_message_number,
+                            query.codes.clone(),
                             &query.table_name,
                         )
                     })
@@ -356,7 +359,8 @@ impl ReplayDbReader {
                     batch_spec.begin_message_number,
                     batch_spec.end_message_number,
                     &batch_spec.range.table_name,
-                );
+                )
+                .with_codes(batch_spec.range.codes.clone());
                 Ok(query_sh_orders_by_range(pool, &query).await?)
             }
             Market::XSHE => {
@@ -366,7 +370,8 @@ impl ReplayDbReader {
                     batch_spec.begin_message_number,
                     batch_spec.end_message_number,
                     &batch_spec.range.table_name,
-                );
+                )
+                .with_codes(batch_spec.range.codes.clone());
                 Ok(query_sz_orders_by_range(pool, &query).await?)
             }
             Market::Unknown => Ok(Vec::new()),
@@ -383,7 +388,8 @@ impl ReplayDbReader {
             batch_spec.begin_message_number,
             batch_spec.end_message_number,
             &batch_spec.range.table_name,
-        );
+        )
+        .with_codes(batch_spec.range.codes.clone());
         Ok(query_transactions_by_range(pool, &query).await?)
     }
 
@@ -395,7 +401,8 @@ impl ReplayDbReader {
 
         let rows = match cursor.range.market {
             Market::XSHG => {
-                let sql = r#"
+                let mut sql = String::from(
+                    r#"
                 SELECT
                     toUnixTimestamp64Milli(time) AS timestamp_ms
                 FROM ?
@@ -405,19 +412,37 @@ impl ReplayDbReader {
                   AND message_number >= ?
                   AND message_number < ?
                   AND channel = ?
-                ORDER BY message_number
-                LIMIT 1
-            "#;
+            "#,
+                );
 
-                client
-                    .query(sql)
+                if !cursor.range.codes.is_empty() {
+                    sql.push_str(" AND code IN (");
+                    for index in 0..cursor.range.codes.len() {
+                        if index > 0 {
+                            sql.push_str(", ");
+                        }
+                        sql.push('?');
+                    }
+                    sql.push(')');
+                }
+
+                sql.push_str(" ORDER BY message_number LIMIT 1");
+
+                let mut db_query = client
+                    .query(&sql)
                     .bind(Identifier(&cursor.range.table_name))
                     .bind(&cursor.range.day)
                     .bind(cursor.range.start_time_ms)
                     .bind(cursor.range.end_time_ms)
                     .bind(cursor.next_message_number)
                     .bind(cursor.range.end_message_number)
-                    .bind(cursor.range.channel)
+                    .bind(cursor.range.channel);
+
+                for code in &cursor.range.codes {
+                    db_query = db_query.bind(code);
+                }
+
+                db_query
                     .fetch_all::<RawNextTimestamp>()
                     .await
                     .map_err(|err| {
@@ -425,7 +450,8 @@ impl ReplayDbReader {
                     })?
             }
             Market::XSHE => {
-                let sql = r#"
+                let mut sql = String::from(
+                    r#"
                 SELECT
                     toUnixTimestamp64Milli(commision_time) AS timestamp_ms
                 FROM ?
@@ -435,19 +461,37 @@ impl ReplayDbReader {
                   AND message_number >= ?
                   AND message_number < ?
                   AND channel = ?
-                ORDER BY message_number
-                LIMIT 1
-            "#;
+            "#,
+                );
 
-                client
-                    .query(sql)
+                if !cursor.range.codes.is_empty() {
+                    sql.push_str(" AND code IN (");
+                    for index in 0..cursor.range.codes.len() {
+                        if index > 0 {
+                            sql.push_str(", ");
+                        }
+                        sql.push('?');
+                    }
+                    sql.push(')');
+                }
+
+                sql.push_str(" ORDER BY message_number LIMIT 1");
+
+                let mut db_query = client
+                    .query(&sql)
                     .bind(Identifier(&cursor.range.table_name))
                     .bind(&cursor.range.day)
                     .bind(cursor.range.start_time_ms)
                     .bind(cursor.range.end_time_ms)
                     .bind(cursor.next_message_number)
                     .bind(cursor.range.end_message_number)
-                    .bind(cursor.range.channel)
+                    .bind(cursor.range.channel);
+
+                for code in &cursor.range.codes {
+                    db_query = db_query.bind(code);
+                }
+
+                db_query
                     .fetch_all::<RawNextTimestamp>()
                     .await
                     .map_err(|err| {
@@ -465,7 +509,8 @@ impl ReplayDbReader {
         cursor: &ReaderCursor,
     ) -> Result<Option<i64>> {
         let client = pool.get_one().await?;
-        let sql = r#"
+        let mut sql = String::from(
+            r#"
             SELECT
                 toUnixTimestamp64Milli(deal_time) AS timestamp_ms
             FROM ?
@@ -475,19 +520,37 @@ impl ReplayDbReader {
               AND transaction_number >= ?
               AND transaction_number < ?
               AND channel_id = ?
-            ORDER BY transaction_number
-            LIMIT 1
-        "#;
+        "#,
+        );
 
-        let rows = client
-            .query(sql)
+        if !cursor.range.codes.is_empty() {
+            sql.push_str(" AND code IN (");
+            for index in 0..cursor.range.codes.len() {
+                if index > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+            }
+            sql.push(')');
+        }
+
+        sql.push_str(" ORDER BY transaction_number LIMIT 1");
+
+        let mut db_query = client
+            .query(&sql)
             .bind(Identifier(&cursor.range.table_name))
             .bind(&cursor.range.day)
             .bind(cursor.range.start_time_ms)
             .bind(cursor.range.end_time_ms)
             .bind(cursor.next_message_number)
             .bind(cursor.range.end_message_number)
-            .bind(cursor.range.channel)
+            .bind(cursor.range.channel);
+
+        for code in &cursor.range.codes {
+            db_query = db_query.bind(code);
+        }
+
+        let rows = db_query
             .fetch_all::<RawNextTimestamp>()
             .await
             .map_err(|err| {
@@ -536,6 +599,7 @@ mod tests {
                 1,
                 10,
                 15,
+                Vec::new(),
                 "unknown",
             )),
             ReaderCursor::new(ChannelRange::new(
@@ -547,6 +611,7 @@ mod tests {
                 2,
                 20,
                 27,
+                Vec::new(),
                 "unknown",
             )),
             ReaderCursor::new(ChannelRange::new(
@@ -558,6 +623,7 @@ mod tests {
                 3,
                 30,
                 30,
+                Vec::new(),
                 "unknown",
             )),
         ];
@@ -607,6 +673,7 @@ mod tests {
                 1,
                 10,
                 14,
+                Vec::new(),
                 "unknown",
             )),
             ReaderCursor::new(ChannelRange::new(
@@ -618,6 +685,7 @@ mod tests {
                 2,
                 20,
                 24,
+                Vec::new(),
                 "unknown",
             )),
             ReaderCursor::new(ChannelRange::new(
@@ -629,6 +697,7 @@ mod tests {
                 3,
                 30,
                 34,
+                Vec::new(),
                 "unknown",
             )),
         ];

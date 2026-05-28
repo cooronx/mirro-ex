@@ -612,5 +612,4 @@ mod tests {
             .collect();
         assert_eq!(message_numbers_after_finish, vec![408]);
     }
-
 }

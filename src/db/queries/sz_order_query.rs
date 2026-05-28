@@ -41,6 +41,7 @@ pub struct SZOrderRangeQuery {
     pub day: String,
     pub start_time_ms: i64,
     pub end_time_ms: i64,
+    pub codes: Vec<String>,
     pub table_name: String,
 }
 
@@ -55,8 +56,18 @@ impl SZOrderRangeQuery {
             day: day.into(),
             start_time_ms,
             end_time_ms,
+            codes: Vec::new(),
             table_name: table_name.into(),
         }
+    }
+
+    pub fn with_codes<I, S>(mut self, codes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.codes = codes.into_iter().map(Into::into).collect();
+        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -77,6 +88,7 @@ pub struct SZOrderByRangeQuery {
     pub channel: i64,
     pub begin_message_number: i64,
     pub end_message_number: i64,
+    pub codes: Vec<String>,
     pub table_name: String,
 }
 
@@ -93,8 +105,18 @@ impl SZOrderByRangeQuery {
             channel,
             begin_message_number,
             end_message_number,
+            codes: Vec::new(),
             table_name: table_name.into(),
         }
+    }
+
+    pub fn with_codes<I, S>(mut self, codes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.codes = codes.into_iter().map(Into::into).collect();
+        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -130,7 +152,8 @@ pub async fn query_sz_order_message_ranges(
     query.validate()?;
 
     let client = pool.get_one().await?;
-    let sql = r#"
+    let mut sql = String::from(
+        r#"
         SELECT
             MIN(message_number) AS min_seq,
             MAX(message_number) AS max_seq,
@@ -139,16 +162,34 @@ pub async fn query_sz_order_message_ranges(
         WHERE EventDate = toDate(?)
           AND commision_time >= fromUnixTimestamp64Milli(?)
           AND commision_time < fromUnixTimestamp64Milli(?)
-        GROUP BY channel
-        ORDER BY channel
-    "#;
+    "#,
+    );
 
-    let rows = client
-        .query(sql)
+    if !query.codes.is_empty() {
+        sql.push_str(" AND code IN (");
+        for index in 0..query.codes.len() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+    }
+
+    sql.push_str(" GROUP BY channel ORDER BY channel");
+
+    let mut db_query = client
+        .query(&sql)
         .bind(Identifier(&query.table_name))
         .bind(&query.day)
         .bind(query.start_time_ms)
-        .bind(query.end_time_ms)
+        .bind(query.end_time_ms);
+
+    for code in &query.codes {
+        db_query = db_query.bind(code);
+    }
+
+    let rows = db_query
         .fetch_all::<RawOrderMessageRange>()
         .await
         .map_err(SZOrderQueryError::Query)?;
@@ -183,7 +224,8 @@ pub async fn query_sz_orders_by_range(
     query.validate()?;
 
     let client = pool.get_one().await?;
-    let sql = r#"
+    let mut sql = String::from(
+        r#"
         SELECT
             channel,
             message_number,
@@ -199,16 +241,35 @@ pub async fn query_sz_orders_by_range(
           AND message_number >= ?
           AND message_number < ?
           AND channel = ?
-        ORDER BY message_number
-    "#;
+    "#,
+    );
 
-    let rows = client
-        .query(sql)
+    if !query.codes.is_empty() {
+        sql.push_str(" AND code IN (");
+        for index in 0..query.codes.len() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+    }
+
+    sql.push_str(" ORDER BY message_number");
+
+    let mut db_query = client
+        .query(&sql)
         .bind(Identifier(&query.table_name))
         .bind(&query.day)
         .bind(query.begin_message_number)
         .bind(query.end_message_number)
-        .bind(query.channel)
+        .bind(query.channel);
+
+    for code in &query.codes {
+        db_query = db_query.bind(code);
+    }
+
+    let rows = db_query
         .fetch_all::<RawSZOrder>()
         .await
         .map_err(SZOrderQueryError::Query)?;

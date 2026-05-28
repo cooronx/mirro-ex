@@ -21,4 +21,6 @@ replay_end_date = "2026-05-12"
 # 每天的回放时段，按东八区本地时间解释，格式为 HH:MM:SS.sss
 replay_start_time = "09:30:00.000"
 replay_end_time = "09:31:00.000"
+replay_codes = ["SH601899","SZ3009000"];
+# 回放的速度
 replay_speed = 1.0

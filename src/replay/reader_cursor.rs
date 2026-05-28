@@ -33,6 +33,8 @@ pub struct ChannelRange {
     pub begin_message_number: i64,
     /// 该 source 在本次回放窗口内的结束消息号（不包含）。
     pub end_message_number: i64,
+    /// 可选的证券代码过滤列表。
+    pub codes: Vec<String>,
     /// 实际查询使用的 ClickHouse 表名。
     pub table_name: String,
 }
@@ -47,6 +49,7 @@ impl ChannelRange {
         channel: i64,
         begin_message_number: i64,
         end_message_number: i64,
+        codes: Vec<String>,
         table_name: impl Into<String>,
     ) -> Self {
         Self {
@@ -58,6 +61,7 @@ impl ChannelRange {
             channel,
             begin_message_number,
             end_message_number,
+            codes,
             table_name: table_name.into(),
         }
     }
@@ -124,6 +128,7 @@ mod tests {
             3,
             100,
             120,
+            Vec::new(),
             "sh_table",
         );
         let cursor = ReaderCursor::new(range);
@@ -144,6 +149,7 @@ mod tests {
             7,
             10,
             15,
+            Vec::new(),
             "sz_table",
         );
         let mut cursor = ReaderCursor::new(range);

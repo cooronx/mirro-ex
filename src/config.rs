@@ -47,6 +47,7 @@ pub struct ReplayConfig {
     pub replay_start_time: NaiveTime,
     #[serde(deserialize_with = "deserialize_replay_time")]
     pub replay_end_time: NaiveTime,
+    pub replay_codes: Option<Vec<String>>,
     #[serde(default = "default_replay_speed")]
     pub replay_speed: f64,
 }

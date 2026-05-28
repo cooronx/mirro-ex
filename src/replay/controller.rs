@@ -20,15 +20,6 @@ const DEFAULT_TICK_INTERVAL_MS: u64 = 100;
 
 pub type Result<T> = std::result::Result<T, ReplayControllerError>;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReplayRequest {
-    pub start_date: NaiveDate,
-    pub end_date: NaiveDate,
-    pub start_time: NaiveTime,
-    pub end_time: NaiveTime,
-    pub replay_speed: f64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayStopReason {
     Finished,
@@ -142,19 +133,15 @@ impl ReplayController {
         }
     }
 
-    pub async fn replay<H>(
-        &self,
-        request: ReplayRequest,
-        handler: &mut H,
-    ) -> Result<ReplayRunReport>
+    pub async fn replay<H>(&self, handler: &mut H) -> Result<ReplayRunReport>
     where
         H: ReplayHandler,
     {
         let total_start = Instant::now();
-        validate_request(&request)?;
+        validate_replay_config(&self.replay_config)?;
 
         let db_pool = DbPool::new(&self.db_config)?;
-        let daily_windows = split_request_into_daily_windows(&request);
+        let daily_windows = split_request_into_daily_windows(&self.replay_config);
 
         let mut daily_reports = Vec::new();
         let mut skipped_days = Vec::new();
@@ -174,7 +161,7 @@ impl ReplayController {
                 .replay_single_day(
                     &db_pool,
                     &daily_window,
-                    request.replay_speed,
+                    self.replay_config.replay_speed,
                     handler,
                 )
                 .await?
@@ -207,11 +194,27 @@ impl ReplayController {
         }
 
         Ok(ReplayRunReport {
-            start_date: request.start_date.format("%Y-%m-%d").to_string(),
-            end_date: request.end_date.format("%Y-%m-%d").to_string(),
-            start_time: request.start_time.format("%H:%M:%S%.3f").to_string(),
-            end_time: request.end_time.format("%H:%M:%S%.3f").to_string(),
-            replay_speed: request.replay_speed,
+            start_date: self
+                .replay_config
+                .replay_start_date
+                .format("%Y-%m-%d")
+                .to_string(),
+            end_date: self
+                .replay_config
+                .replay_end_date
+                .format("%Y-%m-%d")
+                .to_string(),
+            start_time: self
+                .replay_config
+                .replay_start_time
+                .format("%H:%M:%S%.3f")
+                .to_string(),
+            end_time: self
+                .replay_config
+                .replay_end_time
+                .format("%H:%M:%S%.3f")
+                .to_string(),
+            replay_speed: self.replay_config.replay_speed,
             daily_reports,
             skipped_days,
             ticks: total_ticks,
@@ -245,19 +248,22 @@ impl ReplayController {
             daily_window.start_time_ms,
             daily_window.end_time_ms,
             &self.db_config.tables.sh_order,
-        );
+        )
+        .with_codes(self.replay_config.replay_codes.clone().unwrap_or_default());
         let sz_query = SZOrderRangeQuery::new(
             &daily_window.day,
             daily_window.start_time_ms,
             daily_window.end_time_ms,
             &self.db_config.tables.sz_order,
-        );
+        )
+        .with_codes(self.replay_config.replay_codes.clone().unwrap_or_default());
         let transaction_query = TransactionRangeQuery::new(
             &daily_window.day,
             daily_window.start_time_ms,
             daily_window.end_time_ms,
             &self.db_config.tables.transaction,
-        );
+        )
+        .with_codes(self.replay_config.replay_codes.clone().unwrap_or_default());
 
         let reader_build_start = Instant::now();
         let reader = ReplayDbReader::from_range_queries(
@@ -376,36 +382,36 @@ fn asia_shanghai_offset() -> FixedOffset {
     FixedOffset::east_opt(8 * 60 * 60).expect("Asia/Shanghai offset should be valid")
 }
 
-fn validate_request(request: &ReplayRequest) -> Result<()> {
-    if request.start_date > request.end_date {
+fn validate_replay_config(config: &ReplayConfig) -> Result<()> {
+    if config.replay_start_date > config.replay_end_date {
         return Err(ReplayControllerError::InvalidDateRange {
-            start_date: request.start_date.format("%Y-%m-%d").to_string(),
-            end_date: request.end_date.format("%Y-%m-%d").to_string(),
+            start_date: config.replay_start_date.format("%Y-%m-%d").to_string(),
+            end_date: config.replay_end_date.format("%Y-%m-%d").to_string(),
         });
     }
 
-    if request.start_time >= request.end_time {
+    if config.replay_start_time >= config.replay_end_time {
         return Err(ReplayControllerError::InvalidTimeRange {
-            start_time: request.start_time.format("%H:%M:%S%.3f").to_string(),
-            end_time: request.end_time.format("%H:%M:%S%.3f").to_string(),
+            start_time: config.replay_start_time.format("%H:%M:%S%.3f").to_string(),
+            end_time: config.replay_end_time.format("%H:%M:%S%.3f").to_string(),
         });
     }
 
     Ok(())
 }
 
-fn split_request_into_daily_windows(request: &ReplayRequest) -> Vec<DailyReplayWindow> {
-    let mut day = request.start_date;
+fn split_request_into_daily_windows(request: &ReplayConfig) -> Vec<DailyReplayWindow> {
+    let mut day = request.replay_start_date;
     let mut windows = Vec::new();
 
     loop {
         windows.push(DailyReplayWindow {
             day: day.format("%Y-%m-%d").to_string(),
-            start_time_ms: timestamp_ms_for_local_datetime(day, request.start_time),
-            end_time_ms: timestamp_ms_for_local_datetime(day, request.end_time),
+            start_time_ms: timestamp_ms_for_local_datetime(day, request.replay_start_time),
+            end_time_ms: timestamp_ms_for_local_datetime(day, request.replay_end_time),
         });
 
-        if day == request.end_date {
+        if day == request.replay_end_date {
             break;
         }
 
@@ -428,9 +434,9 @@ fn timestamp_ms_for_local_datetime(day: NaiveDate, time: NaiveTime) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DailyReplayWindow, ReplayRequest, split_request_into_daily_windows,
-        timestamp_ms_for_local_datetime,
+        DailyReplayWindow, split_request_into_daily_windows, timestamp_ms_for_local_datetime,
     };
+    use crate::config::ReplayConfig;
     use chrono::{NaiveDate, NaiveTime};
 
     #[test]
@@ -446,11 +452,14 @@ mod tests {
 
     #[test]
     fn splits_cross_day_request_into_daily_windows() {
-        let request = ReplayRequest {
-            start_date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2026, 5, 13).unwrap(),
-            start_time: NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap(),
-            end_time: NaiveTime::from_hms_milli_opt(15, 0, 0, 0).unwrap(),
+        let request = ReplayConfig {
+            lane_queue_capacity: 1,
+            batch_size: 100_000,
+            replay_start_date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
+            replay_end_date: NaiveDate::from_ymd_opt(2026, 5, 13).unwrap(),
+            replay_start_time: NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap(),
+            replay_end_time: NaiveTime::from_hms_milli_opt(15, 0, 0, 0).unwrap(),
+            replay_codes: None,
             replay_speed: 1.0,
         };
 

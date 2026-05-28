@@ -41,6 +41,7 @@ pub struct TransactionRangeQuery {
     pub day: String,
     pub start_time_ms: i64,
     pub end_time_ms: i64,
+    pub codes: Vec<String>,
     pub table_name: String,
 }
 
@@ -55,8 +56,18 @@ impl TransactionRangeQuery {
             day: day.into(),
             start_time_ms,
             end_time_ms,
+            codes: Vec::new(),
             table_name: table_name.into(),
         }
+    }
+
+    pub fn with_codes<I, S>(mut self, codes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.codes = codes.into_iter().map(Into::into).collect();
+        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -141,7 +152,8 @@ pub async fn query_transaction_message_ranges(
     query.validate()?;
 
     let client = pool.get_one().await?;
-    let sql = r#"
+    let mut sql = String::from(
+        r#"
         SELECT
             MIN(transaction_number) AS min_seq,
             MAX(transaction_number) AS max_seq,
@@ -150,16 +162,34 @@ pub async fn query_transaction_message_ranges(
         WHERE EventDate = toDate(?)
           AND deal_time >= fromUnixTimestamp64Milli(?)
           AND deal_time < fromUnixTimestamp64Milli(?)
-        GROUP BY channel
-        ORDER BY channel
-    "#;
+    "#,
+    );
 
-    let rows = client
-        .query(sql)
+    if !query.codes.is_empty() {
+        sql.push_str(" AND code IN (");
+        for index in 0..query.codes.len() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+    }
+
+    sql.push_str(" GROUP BY channel ORDER BY channel");
+
+    let mut db_query = client
+        .query(&sql)
         .bind(Identifier(&query.table_name))
         .bind(&query.day)
         .bind(query.start_time_ms)
-        .bind(query.end_time_ms)
+        .bind(query.end_time_ms);
+
+    for code in &query.codes {
+        db_query = db_query.bind(code);
+    }
+
+    let rows = db_query
         .fetch_all::<RawOrderMessageRange>()
         .await
         .map_err(TransactionQueryError::Query)?;
