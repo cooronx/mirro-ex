@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
@@ -30,18 +29,6 @@ pub struct LevelSnapshot {
 pub struct OrderBookSnapshot {
     pub bids: Vec<LevelSnapshot>,
     pub asks: Vec<LevelSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct OrderBookStats {
-    pub bid_levels: usize,
-    pub ask_levels: usize,
-    pub bid_slots: usize,
-    pub ask_slots: usize,
-    pub live_orders: usize,
-    pub stale_slots: usize,
-    pub pending_cancels: usize,
-    pub pending_reductions: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -184,90 +171,6 @@ impl OrderBook {
 
     pub fn best_ask_price(&mut self) -> Option<i64> {
         self.best_price(BookSide::Ask)
-    }
-
-    pub fn stats(&self) -> OrderBookStats {
-        let bid_slots = Self::side_slots(&self.bids);
-        let ask_slots = Self::side_slots(&self.asks);
-        let live_orders = self.order_hash.len();
-
-        OrderBookStats {
-            bid_levels: self.bids.len(),
-            ask_levels: self.asks.len(),
-            bid_slots,
-            ask_slots,
-            live_orders,
-            stale_slots: bid_slots
-                .saturating_add(ask_slots)
-                .saturating_sub(live_orders),
-            pending_cancels: self.pending_cancels.len(),
-            pending_reductions: self.pending_reductions.len(),
-        }
-    }
-
-    pub fn verify_invariants(&self) -> std::result::Result<(), String> {
-        let mut seen_live_orders: HashMap<OrderId, (BookSide, i64, usize)> = HashMap::new();
-
-        self.verify_side_invariants(BookSide::Bid, &self.bids, &mut seen_live_orders)?;
-        self.verify_side_invariants(BookSide::Ask, &self.asks, &mut seen_live_orders)?;
-
-        for (&order_id, order) in &self.order_hash {
-            if order.volume <= 0 {
-                return Err(format!(
-                    "live order has non-positive volume: order_id={} volume={}",
-                    order_id, order.volume
-                ));
-            }
-
-            let expected_side = Self::book_side_for_direction(order.direction).map_err(|err| {
-                format!(
-                    "live order has invalid direction: order_id={} error={err}",
-                    order_id
-                )
-            })?;
-
-            let Some((actual_side, actual_price, occurrences)) = seen_live_orders.get(&order_id)
-            else {
-                return Err(format!(
-                    "live order is missing from price levels: order_id={} expected_side={:?} expected_price={}",
-                    order_id, expected_side, order.price
-                ));
-            };
-
-            if *occurrences != 1 {
-                return Err(format!(
-                    "live order appears multiple times in price levels: order_id={} occurrences={}",
-                    order_id, occurrences
-                ));
-            }
-
-            if *actual_side != expected_side || *actual_price != order.price {
-                return Err(format!(
-                    "live order is attached to wrong level: order_id={} expected_side={:?} expected_price={} actual_side={:?} actual_price={}",
-                    order_id, expected_side, order.price, actual_side, actual_price
-                ));
-            }
-        }
-
-        for (&order_id, &qty) in &self.pending_cancels {
-            if qty <= 0 {
-                return Err(format!(
-                    "pending cancel has non-positive quantity: order_id={} qty={}",
-                    order_id, qty
-                ));
-            }
-        }
-
-        for (&order_id, &qty) in &self.pending_reductions {
-            if qty <= 0 {
-                return Err(format!(
-                    "pending reduction has non-positive quantity: order_id={} qty={}",
-                    order_id, qty
-                ));
-            }
-        }
-
-        Ok(())
     }
 
     fn submit_limit_order(&mut self, order: L2Order) -> Result<()> {
@@ -537,80 +440,6 @@ impl OrderBook {
             total_qty: level.total_qty,
             order_count,
         })
-    }
-
-    fn side_slots(levels: &BTreeMap<i64, PriceLevel>) -> usize {
-        levels.values().map(|level| level.orders.len()).sum()
-    }
-
-    fn verify_side_invariants(
-        &self,
-        side: BookSide,
-        levels: &BTreeMap<i64, PriceLevel>,
-        seen_live_orders: &mut HashMap<OrderId, (BookSide, i64, usize)>,
-    ) -> std::result::Result<(), String> {
-        for (&price, level) in levels {
-            if level.total_qty < 0 {
-                return Err(format!(
-                    "price level has negative total quantity: side={:?} price={} total_qty={}",
-                    side, price, level.total_qty
-                ));
-            }
-
-            let mut computed_total_qty = 0_i64;
-            let mut live_order_count = 0_usize;
-
-            for &order_id in &level.orders {
-                let Some(order) = self.order_hash.get(&order_id) else {
-                    continue;
-                };
-
-                let order_side = Self::book_side_for_direction(order.direction).map_err(|err| {
-                    format!(
-                        "live order in level has invalid direction: order_id={} side={:?} price={} error={err}",
-                        order_id, side, price
-                    )
-                })?;
-
-                if order_side != side || order.price != price {
-                    return Err(format!(
-                        "live order stale-matched into wrong level: order_id={} level_side={:?} level_price={} order_side={:?} order_price={}",
-                        order_id, side, price, order_side, order.price
-                    ));
-                }
-
-                computed_total_qty += order.volume;
-                live_order_count += 1;
-
-                let entry = seen_live_orders.entry(order_id).or_insert((side, price, 0));
-                if entry.0 != side || entry.1 != price {
-                    return Err(format!(
-                        "live order appears in multiple levels: order_id={} first_side={:?} first_price={} duplicate_side={:?} duplicate_price={}",
-                        order_id, entry.0, entry.1, side, price
-                    ));
-                }
-                entry.2 += 1;
-            }
-
-            if live_order_count == 0 {
-                if level.total_qty != 0 {
-                    return Err(format!(
-                        "empty level still carries quantity: side={:?} price={} total_qty={}",
-                        side, price, level.total_qty
-                    ));
-                }
-                continue;
-            }
-
-            if computed_total_qty != level.total_qty {
-                return Err(format!(
-                    "level total quantity mismatch: side={:?} price={} stored_total={} computed_total={} live_order_count={}",
-                    side, price, level.total_qty, computed_total_qty, live_order_count
-                ));
-            }
-        }
-
-        Ok(())
     }
 }
 

@@ -439,7 +439,8 @@ mod tests {
     use super::ChannelReplayLane;
     use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
     use crate::replay::reader_cursor::ReplayDataKind;
-    use crate::replay::{FetchedBatch, ReplayEvent};
+    use crate::replay::db_reader::FetchedBatch;
+    use crate::replay::ReplayEvent;
 
     fn order_event(channel: i64, channel_number: i64, timestamp_ms: i64) -> ReplayEvent {
         ReplayEvent::Order(L2Order {

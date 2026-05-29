@@ -93,15 +93,6 @@ impl ReplayDbReader {
         })
     }
 
-    pub async fn from_order_range_queries(
-        pool: DbPool,
-        batch_size: i64,
-        sh_query: Option<&SHOrderRangeQuery>,
-        sz_query: Option<&SZOrderRangeQuery>,
-    ) -> Result<Self> {
-        Self::from_range_queries(pool, batch_size, sh_query, sz_query, None).await
-    }
-
     pub async fn from_range_queries(
         pool: DbPool,
         batch_size: i64,
@@ -183,16 +174,8 @@ impl ReplayDbReader {
         Self::new(pool, batch_size, cursors)
     }
 
-    pub fn batch_size(&self) -> i64 {
-        self.batch_size
-    }
-
     pub fn cursors(&self) -> &[ReaderCursor] {
         &self.cursors
-    }
-
-    pub fn cursors_mut(&mut self) -> &mut [ReaderCursor] {
-        &mut self.cursors
     }
 
     pub fn has_unfinished(&self) -> bool {
