@@ -436,11 +436,11 @@ impl ReplayDbReader {
                 let mut sql = String::from(
                     r#"
                 SELECT
-                    toUnixTimestamp64Milli(commision_time) AS timestamp_ms
+                    toUnixTimestamp64Milli(time) AS timestamp_ms
                 FROM ?
                 WHERE EventDate = toDate(?)
-                  AND commision_time >= fromUnixTimestamp64Milli(?)
-                  AND commision_time < fromUnixTimestamp64Milli(?)
+                  AND time >= fromUnixTimestamp64Milli(?)
+                  AND time < fromUnixTimestamp64Milli(?)
                   AND message_number >= ?
                   AND message_number < ?
                   AND channel = ?
@@ -495,14 +495,14 @@ impl ReplayDbReader {
         let mut sql = String::from(
             r#"
             SELECT
-                toUnixTimestamp64Milli(deal_time) AS timestamp_ms
+                toUnixTimestamp64Milli(time) AS timestamp_ms
             FROM ?
             WHERE EventDate = toDate(?)
-              AND deal_time >= fromUnixTimestamp64Milli(?)
-              AND deal_time < fromUnixTimestamp64Milli(?)
-              AND transaction_number >= ?
-              AND transaction_number < ?
-              AND channel_id = ?
+              AND time >= fromUnixTimestamp64Milli(?)
+              AND time < fromUnixTimestamp64Milli(?)
+              AND message_number >= ?
+              AND message_number < ?
+              AND channel = ?
         "#,
         );
 
@@ -517,7 +517,7 @@ impl ReplayDbReader {
             sql.push(')');
         }
 
-        sql.push_str(" ORDER BY transaction_number LIMIT 1");
+        sql.push_str(" ORDER BY message_number LIMIT 1");
 
         let mut db_query = client
             .query(&sql)

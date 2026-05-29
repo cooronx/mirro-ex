@@ -19,7 +19,7 @@ use crate::matcher::order_book::{LevelSnapshot, OrderBook, OrderBookSnapshot};
 use crate::publisher::NatsDispatcher;
 use crate::replay::{ReplayController, ReplayEvent, ReplayHandler};
 
-const DEBUG_TARGET_CODE: Option<&str> = Some("SH600410");
+const DEBUG_TARGET_CODE: Option<&str> = Some("600410.XSHG");
 const DEBUG_SNAPSHOT_DEPTH: usize = 10;
 
 struct OrderBookSnapshotHandler {
@@ -53,13 +53,13 @@ impl OrderBookSnapshotHandler {
     }
 
     fn canonical_code(code: &str, market: Market) -> String {
-        if code.starts_with("SH") || code.starts_with("SZ") {
+        if code.ends_with(".XSHG") || code.ends_with(".XSHE") {
             return code.to_string();
         }
 
         match market {
-            Market::XSHG => format!("SH{code}"),
-            Market::XSHE => format!("SZ{code}"),
+            Market::XSHG => format!("{code}.XSHG"),
+            Market::XSHE => format!("{code}.XSHE"),
             Market::Unknown => code.to_string(),
         }
     }
@@ -140,8 +140,8 @@ impl ReplayHandler for OrderBookSnapshotHandler {
 
                     self.book.apply_order(order.clone()).with_context(|| {
                         format!(
-                            "failed to apply order for code={} channel={} channel_number={}",
-                            order.code, order.channel, order.channel_number
+                            "failed to apply order for code={} channel={} message_number={}",
+                            order.code, order.channel, order.message_number
                         )
                     })?;
                 }
@@ -150,8 +150,8 @@ impl ReplayHandler for OrderBookSnapshotHandler {
                         .apply_transaction(transaction.clone())
                         .with_context(|| {
                             format!(
-                                "failed to apply transaction for code={} channel={} channel_number={}",
-                                transaction.code, transaction.channel, transaction.channel_number
+                                "failed to apply transaction for code={} channel={} message_number={}",
+                                transaction.code, transaction.channel, transaction.message_number
                             )
                         })?;
                 }

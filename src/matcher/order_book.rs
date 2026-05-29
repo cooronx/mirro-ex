@@ -91,17 +91,11 @@ impl OrderBook {
         match transaction.market {
             Market::XSHG => match transaction.deal_type.trim() {
                 "B" | "S" | "N" => {
-                    if transaction.buy_order_number > 0 {
-                        self.reduce_order_if_present(
-                            transaction.buy_order_number,
-                            transaction.volume,
-                        );
+                    if transaction.buy_number > 0 {
+                        self.reduce_order_if_present(transaction.buy_number, transaction.volume);
                     }
-                    if transaction.sell_order_number > 0 {
-                        self.reduce_order_if_present(
-                            transaction.sell_order_number,
-                            transaction.volume,
-                        );
+                    if transaction.sell_number > 0 {
+                        self.reduce_order_if_present(transaction.sell_number, transaction.volume);
                     }
                 }
                 _ => {
@@ -115,11 +109,11 @@ impl OrderBook {
                     self.cancel_transaction_orders(&transaction);
                 }
                 "F" => {
-                    if transaction.buy_order_number > 0 {
-                        self.reduce_order(transaction.buy_order_number, transaction.volume);
+                    if transaction.buy_number > 0 {
+                        self.reduce_order(transaction.buy_number, transaction.volume);
                     }
-                    if transaction.sell_order_number > 0 {
-                        self.reduce_order(transaction.sell_order_number, transaction.volume);
+                    if transaction.sell_number > 0 {
+                        self.reduce_order(transaction.sell_number, transaction.volume);
                     }
                 }
                 _ => {
@@ -129,11 +123,11 @@ impl OrderBook {
                 }
             },
             Market::Unknown => {
-                if transaction.buy_order_number > 0 {
-                    self.reduce_order(transaction.buy_order_number, transaction.volume);
+                if transaction.buy_number > 0 {
+                    self.reduce_order(transaction.buy_number, transaction.volume);
                 }
-                if transaction.sell_order_number > 0 {
-                    self.reduce_order(transaction.sell_order_number, transaction.volume);
+                if transaction.sell_number > 0 {
+                    self.reduce_order(transaction.sell_number, transaction.volume);
                 }
             }
         }
@@ -270,10 +264,10 @@ impl OrderBook {
     }
 
     fn order_id(order: &L2Order) -> OrderId {
-        if order.extra_message_number > 0 {
-            order.extra_message_number
+        if order.order_number > 0 {
+            order.order_number
         } else {
-            order.channel_number
+            order.message_number
         }
     }
 
@@ -296,13 +290,11 @@ impl OrderBook {
             i64::MAX
         };
 
-        if transaction.buy_order_number > 0 {
-            self.cancel_order_volume(transaction.buy_order_number, cancel_qty);
+        if transaction.buy_number > 0 {
+            self.cancel_order_volume(transaction.buy_number, cancel_qty);
         }
-        if transaction.sell_order_number > 0
-            && transaction.sell_order_number != transaction.buy_order_number
-        {
-            self.cancel_order_volume(transaction.sell_order_number, cancel_qty);
+        if transaction.sell_number > 0 && transaction.sell_number != transaction.buy_number {
+            self.cancel_order_volume(transaction.sell_number, cancel_qty);
         }
     }
 
@@ -452,14 +444,14 @@ mod tests {
         L2Order {
             market: Market::XSHG,
             channel: 1,
-            channel_number: order_id,
-            code: "SH600000".to_string(),
+            message_number: order_id,
+            code: "600000.XSHG".to_string(),
             price,
             volume,
             direction,
             order_type: OrderType::Limit,
             timestamp_ms: 1_000,
-            extra_message_number: 0,
+            order_number: 0,
         }
     }
 
@@ -467,39 +459,39 @@ mod tests {
         L2Order {
             market: Market::XSHG,
             channel: 1,
-            channel_number: event_id,
-            code: "SH600000".to_string(),
+            message_number: event_id,
+            code: "600000.XSHG".to_string(),
             price: 0,
             volume: 0,
             direction: OrderDirection::Unknown,
             order_type: OrderType::Cancel,
             timestamp_ms: 1_001,
-            extra_message_number: target_order_id,
+            order_number: target_order_id,
         }
     }
 
-    fn transaction(buy_order_number: i64, sell_order_number: i64, volume: i64) -> L2Transaction {
+    fn transaction(buy_number: i64, sell_number: i64, volume: i64) -> L2Transaction {
         L2Transaction {
             market: Market::XSHG,
             channel: 1,
-            channel_number: 10,
-            code: "SH600000".to_string(),
+            message_number: 10,
+            code: "600000.XSHG".to_string(),
             timestamp_ms: 1_100,
             price: 100_000,
             volume,
-            buy_order_number,
-            sell_order_number,
+            buy_number,
+            sell_number,
             deal_type: "F".to_string(),
         }
     }
 
     fn xshg_transaction(
-        buy_order_number: i64,
-        sell_order_number: i64,
+        buy_number: i64,
+        sell_number: i64,
         volume: i64,
         deal_type: &str,
     ) -> L2Transaction {
-        let mut tx = transaction(buy_order_number, sell_order_number, volume);
+        let mut tx = transaction(buy_number, sell_number, volume);
         tx.deal_type = deal_type.to_string();
         tx
     }
@@ -508,13 +500,13 @@ mod tests {
         L2Transaction {
             market: Market::XSHE,
             channel: 1,
-            channel_number: 11,
-            code: "SZ000001".to_string(),
+            message_number: 11,
+            code: "000001.XSHE".to_string(),
             timestamp_ms: 1_101,
             price: 0,
             volume: 0,
-            buy_order_number: order_number,
-            sell_order_number: 0,
+            buy_number: order_number,
+            sell_number: 0,
             deal_type: "4".to_string(),
         }
     }
@@ -723,7 +715,7 @@ mod tests {
     fn transaction_references_exchange_order_number_not_message_number() {
         let mut book = OrderBook::new();
         let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
-        order.extra_message_number = 88;
+        order.order_number = 88;
 
         book.apply_order(order).unwrap();
         book.apply_transaction(transaction(88, 0, 4)).unwrap();
@@ -740,7 +732,7 @@ mod tests {
         assert!(!book.cancel_order(88));
 
         let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
-        order.extra_message_number = 88;
+        order.order_number = 88;
         book.apply_order(order).unwrap();
 
         let snapshot = book.snapshot(10);
@@ -757,7 +749,7 @@ mod tests {
         book.apply_order(cancel).unwrap();
 
         let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
-        order.extra_message_number = 88;
+        order.order_number = 88;
         book.apply_order(order).unwrap();
 
         let snapshot = book.snapshot(10);
@@ -777,7 +769,7 @@ mod tests {
 
         let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
         order.market = Market::XSHE;
-        order.extra_message_number = 88;
+        order.order_number = 88;
         book.apply_order(order).unwrap();
 
         let snapshot = book.snapshot(10);
@@ -792,7 +784,7 @@ mod tests {
         book.apply_transaction(transaction(88, 0, 4)).unwrap();
 
         let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
-        order.extra_message_number = 88;
+        order.order_number = 88;
         book.apply_order(order).unwrap();
 
         let snapshot = book.snapshot(10);

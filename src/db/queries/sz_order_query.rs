@@ -160,8 +160,8 @@ pub async fn query_sz_order_message_ranges(
             channel
         FROM ?
         WHERE EventDate = toDate(?)
-          AND commision_time >= fromUnixTimestamp64Milli(?)
-          AND commision_time < fromUnixTimestamp64Milli(?)
+          AND time >= fromUnixTimestamp64Milli(?)
+          AND time < fromUnixTimestamp64Milli(?)
     "#,
     );
 
@@ -216,7 +216,7 @@ pub async fn query_sz_order_message_ranges(
 /// # 注意事项
 /// - 消息号范围语义为 `[begin_message_number, end_message_number)`，也就是左闭右开。
 /// - 结果按 `message_number` 排序，适合直接用于后续按 channel 的顺序回放。
-/// - 返回的 `L2Order.channel_number` 对应原始 `message_number` 字段。
+/// - 返回的 `L2Order.message_number` 对应原始 `message_number` 字段。
 pub async fn query_sz_orders_by_range(
     pool: &DbPool,
     query: &SZOrderByRangeQuery,
@@ -230,12 +230,11 @@ pub async fn query_sz_orders_by_range(
             channel,
             message_number,
             code,
-            toUnixTimestamp64Milli(commision_time) AS timestamp_ms,
-            toInt64(commission_price * 10000) AS price,
-            toInt64(commission_volume) AS volume,
+            toUnixTimestamp64Milli(time) AS timestamp_ms,
+            toInt64(price * 10000) AS price,
+            toInt64(volume) AS volume,
             direction,
-            toString(order_type) AS order_type,
-            extra_message_number
+            toString(order_type) AS order_type
         FROM ?
         WHERE EventDate = toDate(?)
           AND message_number >= ?
@@ -287,7 +286,6 @@ struct RawSZOrder {
     volume: i64,
     direction: i8,
     order_type: String,
-    extra_message_number: i64,
 }
 
 impl From<RawSZOrder> for L2Order {
@@ -295,14 +293,14 @@ impl From<RawSZOrder> for L2Order {
         Self {
             market: Market::XSHE,
             channel: value.channel,
-            channel_number: value.message_number,
+            message_number: value.message_number,
             code: value.code,
             price: value.price,
             volume: value.volume,
             direction: normalize_sz_order_direction(value.direction),
             order_type: normalize_sz_order_type(&value.order_type),
             timestamp_ms: value.timestamp_ms,
-            extra_message_number: value.extra_message_number,
+            order_number: 0,
         }
     }
 }
@@ -326,7 +324,7 @@ fn normalize_sz_order_type(order_type: &str) -> OrderType {
 
 #[cfg(test)]
 mod tests {
-    use super::{RawSZOrder, normalize_sz_order_direction, normalize_sz_order_type};
+    use super::RawSZOrder;
     use crate::common::{Market, OrderDirection, OrderType};
 
     #[test]
@@ -340,12 +338,12 @@ mod tests {
             volume: 900,
             direction: 1,
             order_type: "U".to_string(),
-            extra_message_number: 88,
         });
 
         assert_eq!(order.market, Market::XSHE);
-        assert_eq!(order.channel_number, 34);
+        assert_eq!(order.message_number, 34);
         assert_eq!(order.direction, OrderDirection::Buy);
         assert_eq!(order.order_type, OrderType::BestOwn);
+        assert_eq!(order.order_number, 0);
     }
 }

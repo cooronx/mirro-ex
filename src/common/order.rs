@@ -47,8 +47,8 @@ pub struct L2Order {
     pub market: Market,
     /// 频道号
     pub channel: i64,
-    /// 频道内序号，在同一个 channel 里面的 order 和 transaction 都共用，从 1 开始递增
-    pub channel_number: i64,
+    /// 频道内消息序号，在同一个 channel 里面的 order 和 transaction 都共用，从 1 开始递增
+    pub message_number: i64,
     /// 标的代码
     pub code: String,
     /// 委托价格（被放大了 10000 倍，四位小数）
@@ -61,6 +61,6 @@ pub struct L2Order {
     pub order_type: OrderType,
     /// Unix 毫秒时间戳
     pub timestamp_ms: i64,
-    /// 额外消息号，目前用于补充部分市场侧的原始序号信息
-    pub extra_message_number: i64,
+    /// 原始委托单号。深市当前数据固定为 0，沪市使用真实委托单号。
+    pub order_number: i64,
 }

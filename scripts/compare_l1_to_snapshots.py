@@ -65,6 +65,19 @@ def l1_time_to_ms(raw: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def normalize_code(raw: str) -> str:
+    code = raw.strip()
+    if not code:
+        return code
+    if code.endswith(".XSHG") or code.endswith(".XSHE"):
+        return code
+    if code.startswith("SH") and len(code) > 2:
+        return f"{code[2:]}.XSHG"
+    if code.startswith("SZ") and len(code) > 2:
+        return f"{code[2:]}.XSHE"
+    return code
+
+
 def parse_snapshot_cell(raw: str) -> tuple[str, str]:
     raw = raw.strip()
     if not raw:
@@ -117,7 +130,7 @@ def load_snapshots(path: Path) -> list[BookRow]:
             rows.append(
                 BookRow(
                     ts_ms=int(row["ts"]),
-                    code=row["code"],
+                    code=normalize_code(row["code"]),
                     bids=snapshot_fields(row, "bid"),
                     asks=snapshot_fields(row, "ask"),
                 )
@@ -209,7 +222,7 @@ def main() -> None:
             l1_ts_ms = l1_time_to_ms(l1_row["time"])
             l1_bids = l1_fields(l1_row, "BuyPrice", "BuyVol")
             l1_asks = l1_fields(l1_row, "SelPrice", "SelVol")
-            code = l1_row["code"]
+            code = normalize_code(l1_row["code"])
 
             indexed = snapshot_index.get(code)
             if indexed is None:

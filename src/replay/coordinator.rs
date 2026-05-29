@@ -333,7 +333,7 @@ impl ReplayCoordinator {
                 heap.push(HeapHead {
                     timestamp_ms: next_event.timestamp_ms(),
                     lane_key: head.lane_key,
-                    message_number: next_event.channel_number(),
+                    message_number: next_event.message_number(),
                 });
             }
         }
@@ -349,7 +349,7 @@ impl ReplayCoordinator {
                 heap.push(HeapHead {
                     timestamp_ms: event.timestamp_ms(),
                     lane_key: *lane_key,
-                    message_number: event.channel_number(),
+                    message_number: event.message_number(),
                 });
             }
         }
@@ -372,14 +372,14 @@ mod tests {
         ReplayEvent::Order(L2Order {
             market: Market::XSHG,
             channel,
-            channel_number: message_number,
+            message_number,
             code: format!("SH{channel}"),
             price: 1,
             volume: 1,
             direction: OrderDirection::Buy,
             order_type: OrderType::Limit,
             timestamp_ms,
-            extra_message_number: 0,
+            order_number: 0,
         })
     }
 
@@ -468,7 +468,7 @@ mod tests {
         let events = coordinator.emit_events_until(Some(1_600));
         let ordering: Vec<(i64, i64)> = events
             .into_iter()
-            .map(|event| (event.timestamp_ms(), event.channel_number()))
+            .map(|event| (event.timestamp_ms(), event.message_number()))
             .collect();
 
         assert_eq!(ordering, vec![(1_500, 10), (1_500, 20), (1_600, 21)]);

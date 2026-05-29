@@ -216,7 +216,7 @@ pub async fn query_sh_order_message_ranges(
 /// # 注意事项
 /// - 消息号范围语义为 `[begin_message_number, end_message_number)`，也就是左闭右开。
 /// - 结果按 `message_number` 排序，适合直接用于后续按 channel 的顺序回放。
-/// - 返回的 `L2Order.channel_number` 对应原始 `message_number` 字段。
+/// - 返回的 `L2Order.message_number` 对应原始 `message_number` 字段。
 pub async fn query_sh_orders_by_range(
     pool: &DbPool,
     query: &SHOrderByRangeQuery,
@@ -233,7 +233,7 @@ pub async fn query_sh_orders_by_range(
             toUnixTimestamp64Milli(time) AS timestamp_ms,
             toInt64(price * 10000) AS price,
             toInt64(volume) AS volume,
-            bs_flag,
+            direction,
             order_type,
             order_number
         FROM ?
@@ -285,7 +285,7 @@ struct RawSHOrder {
     timestamp_ms: i64,
     price: i64,
     volume: i64,
-    bs_flag: i8,
+    direction: i8,
     order_type: i8,
     order_number: i64,
 }
@@ -295,14 +295,14 @@ impl From<RawSHOrder> for L2Order {
         Self {
             market: Market::XSHG,
             channel: value.channel,
-            channel_number: value.message_number,
+            message_number: value.message_number,
             code: value.code,
             price: value.price,
             volume: value.volume,
-            direction: normalize_sh_order_direction(value.bs_flag),
+            direction: normalize_sh_order_direction(value.direction),
             order_type: normalize_sh_order_type(value.order_type),
             timestamp_ms: value.timestamp_ms,
-            extra_message_number: value.order_number,
+            order_number: value.order_number,
         }
     }
 }
@@ -337,15 +337,15 @@ mod tests {
             timestamp_ms: 1_700_000_000_123,
             price: 123_450,
             volume: 900,
-            bs_flag: 2,
+            direction: 2,
             order_type: 1,
             order_number: 88,
         });
 
         assert_eq!(order.market, Market::XSHG);
-        assert_eq!(order.channel_number, 668_434);
-        assert_eq!(order.direction, OrderDirection::Sell);
+        assert_eq!(order.message_number, 668_434);
+        assert_eq!(order.direction, OrderDirection::Buy);
         assert_eq!(order.order_type, OrderType::Cancel);
-        assert_eq!(order.extra_message_number, 88);
+        assert_eq!(order.order_number, 88);
     }
 }

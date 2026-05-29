@@ -170,7 +170,7 @@ impl ChannelReplayLane {
     pub fn next_buffered_event_timestamp_ms(&self) -> Option<i64> {
         match (self.order_buffer.front(), self.transaction_buffer.front()) {
             (Some(order), Some(transaction)) => {
-                if order.channel_number < transaction.channel_number {
+                if order.message_number < transaction.message_number {
                     Some(order.timestamp_ms)
                 } else {
                     Some(transaction.timestamp_ms)
@@ -201,21 +201,21 @@ impl ChannelReplayLane {
         loop {
             let next_kind = match (self.order_buffer.front(), self.transaction_buffer.front()) {
                 (Some(order), Some(transaction)) => {
-                    if order.channel_number < transaction.channel_number {
+                    if order.message_number < transaction.message_number {
                         Some(ReplayDataKind::Order)
                     } else {
                         Some(ReplayDataKind::Transaction)
                     }
                 }
                 (Some(order), None) => {
-                    if order.channel_number < safe_seq_exclusive {
+                    if order.message_number < safe_seq_exclusive {
                         Some(ReplayDataKind::Order)
                     } else {
                         None
                     }
                 }
                 (None, Some(transaction)) => {
-                    if transaction.channel_number < safe_seq_exclusive {
+                    if transaction.message_number < safe_seq_exclusive {
                         Some(ReplayDataKind::Transaction)
                     } else {
                         None
@@ -230,12 +230,12 @@ impl ChannelReplayLane {
 
             let next_message_number = match next_kind {
                 ReplayDataKind::Order => {
-                    self.order_buffer.front().map(|event| event.channel_number)
+                    self.order_buffer.front().map(|event| event.message_number)
                 }
                 ReplayDataKind::Transaction => self
                     .transaction_buffer
                     .front()
-                    .map(|event| event.channel_number),
+                    .map(|event| event.message_number),
             };
 
             if next_message_number.is_none_or(|message_number| message_number >= safe_seq_exclusive)
@@ -356,10 +356,10 @@ impl ChannelReplayLane {
                 batch.end_message_number,
                 previous_message_number,
                 order.channel,
-                order.channel_number,
+                order.message_number,
             )?;
 
-            previous_message_number = Some(order.channel_number);
+            previous_message_number = Some(order.message_number);
             events.push(order);
         }
 
@@ -384,10 +384,10 @@ impl ChannelReplayLane {
                 batch.end_message_number,
                 previous_message_number,
                 transaction.channel,
-                transaction.channel_number,
+                transaction.message_number,
             )?;
 
-            previous_message_number = Some(transaction.channel_number);
+            previous_message_number = Some(transaction.message_number);
             events.push(transaction);
         }
 
@@ -438,22 +438,22 @@ impl ChannelReplayLane {
 mod tests {
     use super::ChannelReplayLane;
     use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
-    use crate::replay::reader_cursor::ReplayDataKind;
-    use crate::replay::db_reader::FetchedBatch;
     use crate::replay::ReplayEvent;
+    use crate::replay::db_reader::FetchedBatch;
+    use crate::replay::reader_cursor::ReplayDataKind;
 
     fn order_event(channel: i64, channel_number: i64, timestamp_ms: i64) -> ReplayEvent {
         ReplayEvent::Order(L2Order {
             market: Market::XSHG,
             channel,
-            channel_number,
-            code: "SH600000".to_string(),
+            message_number: channel_number,
+            code: "600000.XSHG".to_string(),
             price: 100_000,
             volume: 100,
             direction: OrderDirection::Buy,
             order_type: OrderType::Limit,
             timestamp_ms,
-            extra_message_number: 1,
+            order_number: 1,
         })
     }
 
@@ -461,13 +461,13 @@ mod tests {
         ReplayEvent::Transaction(L2Transaction {
             market: Market::XSHG,
             channel,
-            channel_number,
-            code: "SH600000".to_string(),
+            message_number: channel_number,
+            code: "600000.XSHG".to_string(),
             timestamp_ms,
             price: 100_000,
             volume: 100,
-            buy_order_number: 1,
-            sell_order_number: 2,
+            buy_number: 1,
+            sell_number: 2,
             deal_type: "0".to_string(),
         })
     }
@@ -507,8 +507,8 @@ mod tests {
         let message_numbers: Vec<i64> = ready_events
             .iter()
             .map(|event| match event {
-                ReplayEvent::Order(order) => order.channel_number,
-                ReplayEvent::Transaction(transaction) => transaction.channel_number,
+                ReplayEvent::Order(order) => order.message_number,
+                ReplayEvent::Transaction(transaction) => transaction.message_number,
             })
             .collect();
 
@@ -537,7 +537,7 @@ mod tests {
         let message_numbers: Vec<i64> = ready_events
             .iter()
             .map(|event| match event {
-                ReplayEvent::Transaction(transaction) => transaction.channel_number,
+                ReplayEvent::Transaction(transaction) => transaction.message_number,
                 ReplayEvent::Order(_) => unreachable!(),
             })
             .collect();
@@ -595,8 +595,8 @@ mod tests {
         let message_numbers_before_finish: Vec<i64> = ready_before_finish
             .iter()
             .map(|event| match event {
-                ReplayEvent::Order(order) => order.channel_number,
-                ReplayEvent::Transaction(transaction) => transaction.channel_number,
+                ReplayEvent::Order(order) => order.message_number,
+                ReplayEvent::Transaction(transaction) => transaction.message_number,
             })
             .collect();
         assert_eq!(message_numbers_before_finish, vec![400, 401]);
@@ -607,8 +607,8 @@ mod tests {
         let message_numbers_after_finish: Vec<i64> = ready_after_finish
             .iter()
             .map(|event| match event {
-                ReplayEvent::Order(order) => order.channel_number,
-                ReplayEvent::Transaction(transaction) => transaction.channel_number,
+                ReplayEvent::Order(order) => order.message_number,
+                ReplayEvent::Transaction(transaction) => transaction.message_number,
             })
             .collect();
         assert_eq!(message_numbers_after_finish, vec![408]);

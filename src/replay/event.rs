@@ -30,10 +30,10 @@ impl ReplayEvent {
         }
     }
 
-    pub fn channel_number(&self) -> i64 {
+    pub fn message_number(&self) -> i64 {
         match self {
-            Self::Order(order) => order.channel_number,
-            Self::Transaction(transaction) => transaction.channel_number,
+            Self::Order(order) => order.message_number,
+            Self::Transaction(transaction) => transaction.message_number,
         }
     }
 

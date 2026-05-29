@@ -155,13 +155,13 @@ pub async fn query_transaction_message_ranges(
     let mut sql = String::from(
         r#"
         SELECT
-            MIN(transaction_number) AS min_seq,
-            MAX(transaction_number) AS max_seq,
-            channel_id AS channel
+            MIN(message_number) AS min_seq,
+            MAX(message_number) AS max_seq,
+            channel
         FROM ?
         WHERE EventDate = toDate(?)
-          AND deal_time >= fromUnixTimestamp64Milli(?)
-          AND deal_time < fromUnixTimestamp64Milli(?)
+          AND time >= fromUnixTimestamp64Milli(?)
+          AND time < fromUnixTimestamp64Milli(?)
     "#,
     );
 
@@ -210,14 +210,14 @@ pub async fn query_transaction_message_ranges(
 /// - `query`: 查询条件，包含交易日、channel、消息号范围、表名以及可选的代码过滤列表。
 ///
 /// # 返回
-/// - `Ok(Vec<L2Transaction>)`: 该 channel 在指定消息号范围内的逐笔成交明细，结果按 `transaction_number` 升序返回。
+/// - `Ok(Vec<L2Transaction>)`: 该 channel 在指定消息号范围内的逐笔成交明细，结果按 `message_number` 升序返回。
 /// - `Err(TransactionQueryError)`: 查询参数非法、连接池取连接失败或 ClickHouse 查询失败时返回错误。
 ///
 /// # 注意事项
 /// - 消息号范围语义为 `[begin_message_number, end_message_number)`，也就是左闭右开。
-/// - 结果按 `transaction_number` 排序，适合直接用于后续按 channel 的顺序回放。
+/// - 结果按 `message_number` 排序，适合直接用于后续按 channel 的顺序回放。
 /// - 如果设置了 `codes` 过滤条件，返回结果允许出现消息号缺口，但顺序保持不变。
-/// - 返回的 `L2Transaction.channel_number` 对应原始 `transaction_number` 字段。
+/// - 返回的 `L2Transaction.message_number` 对应原始 `message_number` 字段。
 pub async fn query_transactions_by_range(
     pool: &DbPool,
     query: &TransactionByRangeQuery,
@@ -228,20 +228,20 @@ pub async fn query_transactions_by_range(
     let mut sql = String::from(
         r#"
         SELECT
-            channel_id AS channel,
-            transaction_number AS message_number,
+            channel,
+            message_number,
             code,
-            toUnixTimestamp64Milli(deal_time) AS timestamp_ms,
-            toInt64(deal_price * 10000) AS price,
-            toInt64(deal_volume) AS volume,
-            buy_syh,
-            sell_syh,
+            toUnixTimestamp64Milli(time) AS timestamp_ms,
+            toInt64(price * 10000) AS price,
+            toInt64(volume) AS volume,
+            buy_number,
+            sell_number,
             toString(deal_type) AS deal_type
         FROM ?
         WHERE EventDate = toDate(?)
-          AND transaction_number >= ?
-          AND transaction_number < ?
-          AND channel_id = ?
+          AND message_number >= ?
+          AND message_number < ?
+          AND channel = ?
     "#,
     );
 
@@ -256,7 +256,7 @@ pub async fn query_transactions_by_range(
         sql.push(')');
     }
 
-    sql.push_str(" ORDER BY transaction_number");
+    sql.push_str(" ORDER BY message_number");
 
     let mut db_query = client
         .query(&sql)
@@ -286,8 +286,8 @@ struct RawTransaction {
     timestamp_ms: i64,
     price: i64,
     volume: i64,
-    buy_syh: i64,
-    sell_syh: i64,
+    buy_number: i64,
+    sell_number: i64,
     deal_type: String,
 }
 
@@ -296,13 +296,13 @@ impl From<RawTransaction> for L2Transaction {
         Self {
             market: normalize_transaction_market(&value.code),
             channel: value.channel,
-            channel_number: value.message_number,
+            message_number: value.message_number,
             code: value.code,
             timestamp_ms: value.timestamp_ms,
             price: value.price,
             volume: value.volume,
-            buy_order_number: value.buy_syh,
-            sell_order_number: value.sell_syh,
+            buy_number: value.buy_number,
+            sell_number: value.sell_number,
             deal_type: value.deal_type,
         }
     }
@@ -310,6 +310,8 @@ impl From<RawTransaction> for L2Transaction {
 
 fn normalize_transaction_market(code: &str) -> Market {
     match () {
+        _ if code.ends_with(".XSHG") => Market::XSHG,
+        _ if code.ends_with(".XSHE") => Market::XSHE,
         _ if code.starts_with("SH") => Market::XSHG,
         _ if code.starts_with("SZ") => Market::XSHE,
         _ => Market::Unknown,
@@ -318,7 +320,7 @@ fn normalize_transaction_market(code: &str) -> Market {
 
 #[cfg(test)]
 mod tests {
-    use super::{RawTransaction, normalize_transaction_market};
+    use super::RawTransaction;
     use crate::common::Market;
 
     #[test]
@@ -326,20 +328,20 @@ mod tests {
         let tx = crate::common::L2Transaction::from(RawTransaction {
             channel: 3,
             message_number: 674_296,
-            code: "SH600588".to_string(),
+            code: "600588.XSHG".to_string(),
             timestamp_ms: 1_700_000_000_123,
             price: 123_450,
             volume: 900,
-            buy_syh: 1001,
-            sell_syh: 1002,
+            buy_number: 1001,
+            sell_number: 1002,
             deal_type: "0".to_string(),
         });
 
         assert_eq!(tx.market, Market::XSHG);
         assert_eq!(tx.channel, 3);
-        assert_eq!(tx.channel_number, 674_296);
-        assert_eq!(tx.buy_order_number, 1001);
-        assert_eq!(tx.sell_order_number, 1002);
-        assert_eq!(tx.code, "SH600588");
+        assert_eq!(tx.message_number, 674_296);
+        assert_eq!(tx.buy_number, 1001);
+        assert_eq!(tx.sell_number, 1002);
+        assert_eq!(tx.code, "600588.XSHG");
     }
 }

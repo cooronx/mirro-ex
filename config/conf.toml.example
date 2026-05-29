@@ -1,14 +1,14 @@
 [db]
 url = "http://127.0.0.1:8123"
-user = "your_user"
-password = "your_password"
-database = "your_database"
+user = "rust_user"
+password = "123456"
+database = "default"
 pool_size = 5
 
 [db.tables]
-sh_order = "L2_shorder_rt_distributed"
-sz_order = "L2_order_rt_distributed"
-transaction = "L2_transaction_rt_distributed"
+sh_order = "SHOrder"
+sz_order = "SZOrder"
+transaction = "Transaction"
 
 [replay]
 # 每个channel提前拉取多少个批次
@@ -21,7 +21,7 @@ replay_end_date = "2026-05-12"
 # 每天的回放时段，按东八区本地时间解释，格式为 HH:MM:SS.sss
 replay_start_time = "09:30:00.000"
 replay_end_time = "09:31:00.000"
-replay_codes = ["SH601899","SZ3009000"];
+replay_codes = ["601899.XSHG", "300900.XSHE"]
 # 是否跳过 09:25-09:30 和 11:30-13:00 这两个非连续交易时段
 skip_intraday_breaks = false
 # 回放的速度
