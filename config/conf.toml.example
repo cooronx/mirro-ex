@@ -26,3 +26,7 @@ replay_codes = ["SH601899","SZ3009000"];
 skip_intraday_breaks = false
 # 回放的速度
 replay_speed = 1.0
+
+[nats]
+url = "nats://127.0.0.1:4222"
+subject = "market.snapshot"

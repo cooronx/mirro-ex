@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Error as AnyhowError;
+use async_trait::async_trait;
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use thiserror::Error;
 use tokio::time::{Duration, MissedTickBehavior, interval};
@@ -65,15 +66,17 @@ pub struct ReplayRunReport {
     pub stop_reason: ReplayStopReason,
 }
 
+#[async_trait]
 pub trait ReplayHandler {
-    fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()>;
+    async fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Default)]
 pub struct PrintReplayHandler;
 
+#[async_trait]
 impl ReplayHandler for PrintReplayHandler {
-    fn on_events(&mut self, _events: &[ReplayEvent]) -> anyhow::Result<()> {
+    async fn on_events(&mut self, _events: &[ReplayEvent]) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -328,6 +331,7 @@ impl ReplayController {
             if !result.events.is_empty() {
                 handler
                     .on_events(&result.events)
+                    .await
                     .map_err(ReplayControllerError::Handler)?;
             }
 

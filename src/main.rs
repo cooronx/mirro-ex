@@ -3,17 +3,20 @@ mod config;
 mod db;
 mod marketdata;
 mod matcher;
+mod publisher;
 mod replay;
 mod sim_clock;
 
 use std::fs::{self, File};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use csv::Writer;
 
 use crate::common::{L2Order, Market, OrderType};
 use crate::config::AppConfig;
 use crate::matcher::order_book::{LevelSnapshot, OrderBook, OrderBookSnapshot};
+use crate::publisher::NatsDispatcher;
 use crate::replay::{ReplayController, ReplayEvent, ReplayHandler};
 
 const DEBUG_TARGET_CODE: Option<&str> = Some("SH600410");
@@ -24,15 +27,22 @@ struct OrderBookSnapshotHandler {
     book: OrderBook,
     snapshot_depth: usize,
     writer: Writer<File>,
+    dispatcher: NatsDispatcher,
 }
 
 impl OrderBookSnapshotHandler {
-    fn new(target_code: Option<String>, snapshot_depth: usize, writer: Writer<File>) -> Self {
+    fn new(
+        target_code: Option<String>,
+        snapshot_depth: usize,
+        writer: Writer<File>,
+        dispatcher: NatsDispatcher,
+    ) -> Self {
         Self {
             target_code,
             book: OrderBook::new(),
             snapshot_depth,
             writer,
+            dispatcher,
         }
     }
 
@@ -85,7 +95,7 @@ impl OrderBookSnapshotHandler {
         self.book.snapshot(self.snapshot_depth)
     }
 
-    fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) -> anyhow::Result<()> {
+    async fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) -> anyhow::Result<()> {
         let snapshot = self.current_snapshot();
         let mut row = vec![timestamp_ms.to_string(), code.to_string()];
         for index in 0..5 {
@@ -98,6 +108,10 @@ impl OrderBookSnapshotHandler {
         self.writer
             .write_record(&row)
             .context("failed to write order book snapshot csv row")?;
+        self.dispatcher
+            .publish_snapshot(timestamp_ms, code, snapshot)
+            .await
+            .context("failed to publish order book snapshot to nats")?;
 
         Ok(())
     }
@@ -109,8 +123,9 @@ impl OrderBookSnapshotHandler {
     }
 }
 
+#[async_trait]
 impl ReplayHandler for OrderBookSnapshotHandler {
-    fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()> {
+    async fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()> {
         for event in events {
             let target_code = self.target_code_for_event(event);
             if self.canonical_event_code(event) != target_code {
@@ -142,7 +157,8 @@ impl ReplayHandler for OrderBookSnapshotHandler {
                 }
             }
 
-            self.record_snapshot(event.timestamp_ms(), &target_code)?;
+            self.record_snapshot(event.timestamp_ms(), &target_code)
+                .await?;
         }
 
         Ok(())
@@ -163,11 +179,15 @@ async fn main() -> Result<()> {
         .context("failed to write csv header")?;
 
     let config = AppConfig::load()?;
+    let dispatcher = NatsDispatcher::new(&config.nats)
+        .await
+        .context("failed to initialize nats dispatcher")?;
     let controller = ReplayController::new(config.db, config.replay);
     let mut handler = OrderBookSnapshotHandler::new(
         DEBUG_TARGET_CODE.map(str::to_string),
         DEBUG_SNAPSHOT_DEPTH,
         writer,
+        dispatcher,
     );
 
     controller.replay(&mut handler).await?;

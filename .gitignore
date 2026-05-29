@@ -4,3 +4,4 @@
 .codex
 .agents
 data/
+__pycache__

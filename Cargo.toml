@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+async-nats = "0.44.2"
+async-trait = "0.1.89"
 chrono = "0.4.42"
 clickhouse = "0.15.0"
 csv = "1.4.0"

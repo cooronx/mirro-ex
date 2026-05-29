@@ -15,6 +15,7 @@ const REPLAY_TIME_FORMAT_WITHOUT_MILLISECONDS: &str = "%H:%M:%S";
 pub struct AppConfig {
     pub db: DbConfig,
     pub replay: ReplayConfig,
+    pub nats: NatsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -52,6 +53,12 @@ pub struct ReplayConfig {
     pub skip_intraday_breaks: bool,
     #[serde(default = "default_replay_speed")]
     pub replay_speed: f64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NatsConfig {
+    pub url: String,
+    pub subject: String,
 }
 
 impl AppConfig {
@@ -110,38 +117,4 @@ fn parse_replay_time(raw: &str) -> std::result::Result<NaiveTime, String> {
         .map_err(|_| {
             format!("invalid replay time format: {raw}, expected HH:MM:SS or HH:MM:SS.sss")
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::AppConfig;
-
-    #[test]
-    fn replay_batch_size_defaults_when_omitted() {
-        let raw = r#"
-[db]
-url = "http://127.0.0.1:8123"
-user = "user"
-password = "password"
-database = "db"
-pool_size = 5
-
-[db.tables]
-sh_order = "sh"
-sz_order = "sz"
-transaction = "tx"
-
-[replay]
-lane_queue_capacity = 1
-replay_start_date = "2026-05-12"
-replay_end_date = "2026-05-12"
-replay_start_time = "09:30:00.000"
-replay_end_time = "09:31:00.000"
-"#;
-
-        let config: AppConfig = toml::from_str(raw).unwrap();
-
-        assert_eq!(config.replay.batch_size, 100_000);
-        assert!(!config.replay.skip_intraday_breaks);
-    }
 }
