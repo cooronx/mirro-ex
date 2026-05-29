@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package mirro.marketdata;
+
+message PriceLevel {
+  int64 price = 1;
+  int64 quantity = 2;
+}
+
+message OrderBookSnapshot {
+  int64 event_ts_ms = 1;
+  string code = 2;
+  repeated PriceLevel bids = 3;
+  repeated PriceLevel asks = 4;
+}
+
+message Envelope {
+  uint64 sequence = 1;
+  int64 publish_ts_ms = 2;
+  OrderBookSnapshot snapshot = 3;
+}

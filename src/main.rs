@@ -1,6 +1,7 @@
 mod common;
 mod config;
 mod db;
+mod marketdata;
 mod matcher;
 mod replay;
 mod sim_clock;
