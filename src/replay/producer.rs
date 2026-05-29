@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tracing::error;
 
 use crate::common::Market;
 
@@ -143,9 +144,11 @@ pub async fn spawn_lane_producers(
                     error_chain.push_str(&cause.to_string());
                     source = cause.source();
                 }
-                eprintln!(
-                    "lane_producer_failed market={:?} channel={} error_chain={}",
-                    lane_key.market, lane_key.channel, error_chain
+                error!(
+                    market = ?lane_key.market,
+                    channel = lane_key.channel,
+                    error_chain = %error_chain,
+                    "lane producer failed"
                 );
             }
         });

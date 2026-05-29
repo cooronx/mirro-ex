@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub db: DbConfig,
     pub replay: ReplayConfig,
     pub nats: NatsConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -61,6 +63,16 @@ pub struct NatsConfig {
     pub subject: String,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct LoggingConfig {
+    pub level: String,
+    pub directory: String,
+    pub file_prefix: String,
+    pub to_stdout: bool,
+    pub to_file: bool,
+}
+
 impl AppConfig {
     pub fn load() -> Result<Self> {
         Self::from_path(DEFAULT_CONFIG_PATH)
@@ -86,6 +98,34 @@ fn default_replay_speed() -> f64 {
 
 fn default_replay_batch_size() -> i64 {
     100_000
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_directory() -> String {
+    "logs".to_string()
+}
+
+fn default_log_file_prefix() -> String {
+    "mirro-ex".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            directory: default_log_directory(),
+            file_prefix: default_log_file_prefix(),
+            to_stdout: default_true(),
+            to_file: default_true(),
+        }
+    }
 }
 
 fn deserialize_replay_date<'de, D>(deserializer: D) -> std::result::Result<NaiveDate, D::Error>

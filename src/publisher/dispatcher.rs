@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use tracing::info;
 
 use crate::config::NatsConfig;
 use crate::matcher::order_book::OrderBookSnapshot;
@@ -43,6 +44,8 @@ impl NatsDispatcher {
                 source,
             }
         })?;
+
+        info!(url = %config.url, subject = %config.subject, "connected to nats");
 
         Ok(Self {
             client,

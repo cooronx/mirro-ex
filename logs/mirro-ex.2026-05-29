@@ -1,0 +1,8 @@
+2026-05-29T09:09:00.267735Z  INFO starting replay output_path="data/order_book_snapshot.csv" db_url=http://127.0.0.1:8123 db_name=default sh_order_table=SHOrder sz_order_table=SZOrder transaction_table=Transaction nats_subject=market.snapshot replay_start_date=2026-05-14 replay_end_date=2026-05-14 replay_start_time=09:15:00.000 replay_end_time=10:30:00.000 replay_speed=100.0 batch_size=10000 skip_intraday_breaks=true replay_codes=Some(["600410.XSHG"])
+2026-05-29T09:09:00.270020Z  INFO connected successfully server=4222 max_payload=1048576
+2026-05-29T09:09:00.270134Z  INFO connected to nats url=nats://127.0.0.1:4222 subject=market.snapshot
+2026-05-29T09:09:00.270153Z  INFO event: connected
+2026-05-29 17:11:05.894  INFO starting replay output_path="data/order_book_snapshot.csv" db_url=http://127.0.0.1:8123 db_name=default sh_order_table=SHOrder sz_order_table=SZOrder transaction_table=Transaction nats_subject=market.snapshot replay_start_date=2026-05-14 replay_end_date=2026-05-14 replay_start_time=09:15:00.000 replay_end_time=10:30:00.000 replay_speed=100.0 batch_size=10000 skip_intraday_breaks=true replay_codes=Some(["600410.XSHG"])
+2026-05-29 17:11:05.896  INFO connected successfully server=4222 max_payload=1048576
+2026-05-29 17:11:05.896  INFO connected to nats url=nats://127.0.0.1:4222 subject=market.snapshot
+2026-05-29 17:11:05.897  INFO event: connected

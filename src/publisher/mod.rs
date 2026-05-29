@@ -1,4 +1,4 @@
 pub mod dispatcher;
 pub mod snapshot;
 
-pub use dispatcher::{NatsDispatcher, NatsDispatcherError};
+pub use dispatcher::NatsDispatcher;
