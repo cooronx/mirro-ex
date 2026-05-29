@@ -5,3 +5,5 @@
 .agents
 data/
 __pycache__
+logs/
+.clickhouse/
