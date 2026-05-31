@@ -42,6 +42,8 @@ pub struct ReplayConfig {
     pub lane_queue_capacity: usize,
     #[serde(default = "default_replay_batch_size")]
     pub batch_size: i64,
+    #[serde(default = "default_snapshot_depth")]
+    pub snapshot_depth: usize,
     #[serde(deserialize_with = "deserialize_replay_date")]
     pub replay_start_date: NaiveDate,
     #[serde(deserialize_with = "deserialize_replay_date")]
@@ -98,6 +100,10 @@ fn default_replay_speed() -> f64 {
 
 fn default_replay_batch_size() -> i64 {
     100_000
+}
+
+fn default_snapshot_depth() -> usize {
+    5
 }
 
 fn default_log_level() -> String {

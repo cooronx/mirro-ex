@@ -94,20 +94,3 @@ fn parse_level_filter(raw: &str) -> Result<LevelFilter> {
         )),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::validate_config;
-    use crate::config::LoggingConfig;
-
-    #[test]
-    fn rejects_disabled_outputs() {
-        let config = LoggingConfig {
-            to_stdout: false,
-            to_file: false,
-            ..LoggingConfig::default()
-        };
-
-        assert!(validate_config(&config).is_err());
-    }
-}

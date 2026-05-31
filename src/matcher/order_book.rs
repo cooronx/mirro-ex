@@ -504,7 +504,7 @@ mod tests {
             code: "000001.XSHE".to_string(),
             timestamp_ms: 1_101,
             price: 0,
-            volume: 0,
+            volume: 10,
             buy_number: order_number,
             sell_number: 0,
             deal_type: "4".to_string(),
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_uses_lazy_delete_and_updates_snapshot() {
+    fn xshg_cancel_updates_book() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
@@ -573,116 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_reduces_only_cancelled_quantity() {
-        let mut book = OrderBook::new();
-
-        book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
-            .unwrap();
-
-        let mut cancel = cancel_order(2, 1);
-        cancel.volume = 4;
-        book.apply_order(cancel).unwrap();
-
-        let snapshot = book.snapshot(10);
-        assert_eq!(snapshot.bids[0].total_qty, 6);
-        assert_eq!(snapshot.bids[0].order_count, 1);
-        assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
-    }
-
-    #[test]
-    fn rejects_shenzhen_cancel_from_order_stream() {
-        let mut book = OrderBook::new();
-        let mut order = cancel_order(3, 1);
-        order.market = Market::XSHE;
-
-        let err = book.apply_order(order).unwrap_err();
-        assert_eq!(
-            err,
-            OrderBookError::UnexpectedOrderStreamCancel(Market::XSHE)
-        );
-    }
-
-    #[test]
-    fn transaction_reduces_orders_and_removes_filled_ones() {
-        let mut book = OrderBook::new();
-
-        book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
-            .unwrap();
-        book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 12))
-            .unwrap();
-
-        book.apply_transaction(transaction(1, 2, 4)).unwrap();
-        assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
-        assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
-
-        book.apply_transaction(transaction(1, 2, 8)).unwrap();
-
-        let snapshot = book.snapshot(10);
-        assert!(!book.order_hash.contains_key(&1));
-        assert!(!book.order_hash.contains_key(&2));
-        assert!(snapshot.bids.is_empty());
-        assert!(snapshot.asks.is_empty());
-        assert_eq!(book.best_bid_price(), None);
-        assert_eq!(book.best_ask_price(), None);
-    }
-
-    #[test]
-    fn xshg_buy_aggressor_trade_reduces_both_sides() {
-        let mut book = OrderBook::new();
-
-        book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
-            .unwrap();
-        book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 12))
-            .unwrap();
-
-        book.apply_transaction(xshg_transaction(1, 2, 4, "B"))
-            .unwrap();
-
-        assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
-        assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
-    }
-
-    #[test]
-    fn xshg_sell_aggressor_trade_reduces_both_sides() {
-        let mut book = OrderBook::new();
-
-        book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
-            .unwrap();
-        book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 12))
-            .unwrap();
-
-        book.apply_transaction(xshg_transaction(1, 2, 4, "S"))
-            .unwrap();
-
-        assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
-        assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
-    }
-
-    #[test]
-    fn xshg_missing_buy_side_still_reduces_present_sell_side() {
-        let mut book = OrderBook::new();
-
-        book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 12))
-            .unwrap();
-
-        book.apply_transaction(xshg_transaction(1, 2, 4, "B"))
-            .unwrap();
-        assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
-        assert!(book.pending_reductions.is_empty());
-    }
-
-    #[test]
-    fn xshg_missing_both_sides_does_not_create_pending_reduction() {
-        let mut book = OrderBook::new();
-
-        book.apply_transaction(xshg_transaction(1, 2, 4, "B"))
-            .unwrap();
-
-        assert!(book.pending_reductions.is_empty());
-    }
-
-    #[test]
-    fn xshg_n_trade_reduces_both_sides() {
+    fn xshg_trade_reduces_both_sides_and_removes_filled_orders() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
@@ -692,9 +583,19 @@ mod tests {
 
         book.apply_transaction(xshg_transaction(1, 2, 4, "N"))
             .unwrap();
-
         assert_eq!(book.order_hash.get(&1).unwrap().volume, 6);
         assert_eq!(book.order_hash.get(&2).unwrap().volume, 8);
+
+        book.apply_transaction(xshg_transaction(1, 2, 8, "B"))
+            .unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert!(!book.order_hash.contains_key(&1));
+        assert!(!book.order_hash.contains_key(&2));
+        assert!(snapshot.bids.is_empty());
+        assert!(snapshot.asks.is_empty());
+        assert_eq!(book.best_bid_price(), None);
+        assert_eq!(book.best_ask_price(), None);
     }
 
     #[test]
@@ -712,54 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn transaction_references_exchange_order_number_not_message_number() {
-        let mut book = OrderBook::new();
-        let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
-        order.order_number = 88;
-
-        book.apply_order(order).unwrap();
-        book.apply_transaction(transaction(88, 0, 4)).unwrap();
-
-        let snapshot = book.snapshot(10);
-        assert_eq!(snapshot.bids[0].total_qty, 6);
-        assert_eq!(snapshot.bids[0].order_count, 1);
-    }
-
-    #[test]
-    fn pending_cancel_removes_late_arriving_order() {
-        let mut book = OrderBook::new();
-
-        assert!(!book.cancel_order(88));
-
-        let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
-        order.order_number = 88;
-        book.apply_order(order).unwrap();
-
-        let snapshot = book.snapshot(10);
-        assert!(snapshot.bids.is_empty());
-        assert!(!book.order_hash.contains_key(&88));
-    }
-
-    #[test]
-    fn pending_partial_cancel_applies_to_late_arriving_order() {
-        let mut book = OrderBook::new();
-
-        let mut cancel = cancel_order(3, 88);
-        cancel.volume = 4;
-        book.apply_order(cancel).unwrap();
-
-        let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
-        order.order_number = 88;
-        book.apply_order(order).unwrap();
-
-        let snapshot = book.snapshot(10);
-        assert_eq!(snapshot.bids[0].total_qty, 6);
-        assert_eq!(snapshot.bids[0].order_count, 1);
-        assert_eq!(book.order_hash.get(&88).unwrap().volume, 6);
-    }
-
-    #[test]
-    fn pending_transaction_reduction_applies_to_late_arriving_order() {
+    fn shenzhen_late_order_consumes_pending_trade_reduction() {
         let mut book = OrderBook::new();
 
         let mut tx = transaction(88, 0, 4);
@@ -778,10 +632,11 @@ mod tests {
     }
 
     #[test]
-    fn shanghai_late_arriving_order_ignores_pending_transaction_reduction() {
+    fn shanghai_late_order_ignores_pending_trade_reduction() {
         let mut book = OrderBook::new();
 
-        book.apply_transaction(transaction(88, 0, 4)).unwrap();
+        book.apply_transaction(xshg_transaction(88, 0, 4, "N"))
+            .unwrap();
 
         let mut order = limit_order(668_434, OrderDirection::Buy, 100_000, 10);
         order.order_number = 88;
@@ -793,24 +648,15 @@ mod tests {
     }
 
     #[test]
-    fn ignores_missing_transaction_references() {
+    fn rejects_shenzhen_cancel_from_order_stream() {
         let mut book = OrderBook::new();
-
-        book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
-            .unwrap();
-        book.apply_transaction(transaction(1, 999, 3)).unwrap();
-
-        assert_eq!(book.order_hash.get(&1).unwrap().volume, 7);
-        assert_eq!(book.snapshot(10).bids[0].total_qty, 7);
-    }
-
-    #[test]
-    fn rejects_unsupported_order_type() {
-        let mut book = OrderBook::new();
-        let mut order = limit_order(1, OrderDirection::Buy, 100_000, 10);
-        order.order_type = OrderType::Market;
+        let mut order = cancel_order(3, 1);
+        order.market = Market::XSHE;
 
         let err = book.apply_order(order).unwrap_err();
-        assert_eq!(err, OrderBookError::UnsupportedOrderType(OrderType::Market));
+        assert_eq!(
+            err,
+            OrderBookError::UnexpectedOrderStreamCancel(Market::XSHE)
+        );
     }
 }

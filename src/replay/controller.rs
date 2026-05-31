@@ -460,6 +460,7 @@ mod tests {
         let request = ReplayConfig {
             lane_queue_capacity: 1,
             batch_size: 100_000,
+            snapshot_depth: 5,
             replay_start_date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
             replay_end_date: NaiveDate::from_ymd_opt(2026, 5, 13).unwrap(),
             replay_start_time: NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap(),

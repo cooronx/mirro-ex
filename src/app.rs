@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 
 use anyhow::{Context, Result};
@@ -11,12 +12,9 @@ use crate::matcher::order_book::{LevelSnapshot, OrderBook, OrderBookSnapshot};
 use crate::publisher::NatsDispatcher;
 use crate::replay::{ReplayController, ReplayEvent, ReplayHandler};
 
-const DEBUG_TARGET_CODE: Option<&str> = Some("600410.XSHG");
-const DEBUG_SNAPSHOT_DEPTH: usize = 10;
-
 struct OrderBookSnapshotHandler {
-    target_code: Option<String>,
-    book: OrderBook,
+    tracked_codes: Option<HashSet<String>>,
+    books: HashMap<String, OrderBook>,
     snapshot_depth: usize,
     writer: Writer<File>,
     dispatcher: NatsDispatcher,
@@ -24,14 +22,14 @@ struct OrderBookSnapshotHandler {
 
 impl OrderBookSnapshotHandler {
     fn new(
-        target_code: Option<String>,
+        tracked_codes: Option<HashSet<String>>,
         snapshot_depth: usize,
         writer: Writer<File>,
         dispatcher: NatsDispatcher,
     ) -> Self {
         Self {
-            target_code,
-            book: OrderBook::new(),
+            tracked_codes,
+            books: HashMap::new(),
             snapshot_depth,
             writer,
             dispatcher,
@@ -65,15 +63,11 @@ impl OrderBookSnapshotHandler {
         }
     }
 
-    fn target_code_for_event(&mut self, event: &ReplayEvent) -> String {
-        if self.target_code.is_none() {
-            self.target_code = Some(self.canonical_event_code(event));
+    fn should_track_code(&self, code: &str) -> bool {
+        match &self.tracked_codes {
+            Some(tracked_codes) => tracked_codes.contains(code),
+            None => true,
         }
-
-        self.target_code
-            .as_ref()
-            .cloned()
-            .expect("target code should be initialized")
     }
 
     fn level_cell(levels: &[LevelSnapshot], index: usize) -> String {
@@ -83,12 +77,19 @@ impl OrderBookSnapshotHandler {
             .unwrap_or_default()
     }
 
-    fn current_snapshot(&mut self) -> OrderBookSnapshot {
-        self.book.snapshot(self.snapshot_depth)
+    fn book_for_code(&mut self, code: &str) -> &mut OrderBook {
+        self.books
+            .entry(code.to_string())
+            .or_insert_with(OrderBook::new)
+    }
+
+    fn current_snapshot(&mut self, code: &str) -> OrderBookSnapshot {
+        let snapshot_depth = self.snapshot_depth;
+        self.book_for_code(code).snapshot(snapshot_depth)
     }
 
     async fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) -> anyhow::Result<()> {
-        let snapshot = self.current_snapshot();
+        let snapshot = self.current_snapshot(code);
         let mut row = vec![timestamp_ms.to_string(), code.to_string()];
         for index in 0..5 {
             row.push(Self::level_cell(&snapshot.bids, index));
@@ -119,8 +120,8 @@ impl OrderBookSnapshotHandler {
 impl ReplayHandler for OrderBookSnapshotHandler {
     async fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()> {
         for event in events {
-            let target_code = self.target_code_for_event(event);
-            if self.canonical_event_code(event) != target_code {
+            let event_code = self.canonical_event_code(event);
+            if !self.should_track_code(&event_code) {
                 continue;
             }
 
@@ -130,15 +131,17 @@ impl ReplayHandler for OrderBookSnapshotHandler {
                         continue;
                     }
 
-                    self.book.apply_order(order.clone()).with_context(|| {
-                        format!(
-                            "failed to apply order for code={} channel={} message_number={}",
-                            order.code, order.channel, order.message_number
-                        )
-                    })?;
+                    self.book_for_code(&event_code)
+                        .apply_order(order.clone())
+                        .with_context(|| {
+                            format!(
+                                "failed to apply order for code={} channel={} message_number={}",
+                                order.code, order.channel, order.message_number
+                            )
+                        })?;
                 }
                 ReplayEvent::Transaction(transaction) => {
-                    self.book
+                    self.book_for_code(&event_code)
                         .apply_transaction(transaction.clone())
                         .with_context(|| {
                             format!(
@@ -149,7 +152,7 @@ impl ReplayHandler for OrderBookSnapshotHandler {
                 }
             }
 
-            self.record_snapshot(event.timestamp_ms(), &target_code)
+            self.record_snapshot(event.timestamp_ms(), &event_code)
                 .await?;
         }
 
@@ -183,6 +186,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         replay_end_time = %config.replay.replay_end_time.format("%H:%M:%S%.3f"),
         replay_speed = config.replay.replay_speed,
         batch_size = config.replay.batch_size,
+        snapshot_depth = config.replay.snapshot_depth,
         skip_intraday_breaks = config.replay.skip_intraday_breaks,
         replay_codes = ?config.replay.replay_codes,
         "starting replay"
@@ -191,13 +195,15 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let dispatcher = NatsDispatcher::new(&config.nats)
         .await
         .context("failed to initialize nats dispatcher")?;
+    let tracked_codes = config
+        .replay
+        .replay_codes
+        .clone()
+        .map(|codes| codes.into_iter().collect::<HashSet<_>>());
+    let snapshot_depth = config.replay.snapshot_depth;
     let controller = ReplayController::new(config.db, config.replay);
-    let mut handler = OrderBookSnapshotHandler::new(
-        DEBUG_TARGET_CODE.map(str::to_string),
-        DEBUG_SNAPSHOT_DEPTH,
-        writer,
-        dispatcher,
-    );
+    let mut handler =
+        OrderBookSnapshotHandler::new(tracked_codes, snapshot_depth, writer, dispatcher);
 
     let report = controller.replay(&mut handler).await?;
     handler.flush()?;

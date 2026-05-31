@@ -212,7 +212,7 @@ def main() -> None:
     snapshot_index = index_snapshots_by_code(snapshots)
     best_rows: list[dict[str, str]] = []
     nearby_rows: list[dict[str, str]] = []
-    exact_matches = 0
+    exact_match_rows = 0
     total_rows = 0
 
     with l1_path.open("r", newline="") as fh:
@@ -265,7 +265,7 @@ def main() -> None:
 
             best_score, _, best_snapshot = candidates[0]
             if best_score == 0:
-                exact_matches += 1
+                exact_match_rows += 1
             best_rows.append(
                 format_match_row(
                     l1_row, l1_ts_ms, l1_bids, l1_asks, best_snapshot, best_score
@@ -280,8 +280,10 @@ def main() -> None:
     write_csv(best_output_path, best_rows)
     write_csv(nearby_output_path, nearby_rows)
 
+    unmatched_rows = total_rows - exact_match_rows
     print(f"total_l1_rows={total_rows}")
-    print(f"exact_best_matches={exact_matches}")
+    print(f"exact_match_rows={exact_match_rows}")
+    print(f"unmatched_l1_rows={unmatched_rows}")
     print(f"best_output={best_output_path}")
     print(f"nearby_output={nearby_output_path}")
 

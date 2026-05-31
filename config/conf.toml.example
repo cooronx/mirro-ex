@@ -13,6 +13,8 @@ transaction = "Transaction"
 [replay]
 # 每个channel提前拉取多少个批次
 lane_queue_capacity = 8
+# 输出盘口的档位深度
+snapshot_depth = 5
 # 每次从数据库拉取多少条事件，越小越省内存，但查询次数会更多
 batch_size = 100000
 # 回放日期范围，格式为 YYYY-MM-DD
