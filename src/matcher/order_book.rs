@@ -969,7 +969,10 @@ mod tests {
 
         assert!(book.has_unsettled_holdings());
         assert_eq!(book.holding_orders.get(&2).unwrap().remaining_volume, 3);
-        assert_eq!(book.holding_orders.get(&2).unwrap().resting_price, Some(101_000));
+        assert_eq!(
+            book.holding_orders.get(&2).unwrap().resting_price,
+            Some(101_000)
+        );
 
         let mut unrelated_trade = transaction(99, 100, 1);
         unrelated_trade.market = Market::XSHE;

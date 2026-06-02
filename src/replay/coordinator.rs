@@ -156,6 +156,24 @@ impl ReplayCoordinator {
         self.tick_interval_ms
     }
 
+    pub fn pause_clock(&mut self) -> Result<()> {
+        self.clock.pause()?;
+        Ok(())
+    }
+
+    pub fn resume_clock(&mut self) -> Result<()> {
+        self.clock.resume()?;
+        Ok(())
+    }
+
+    pub fn current_sim_now(&mut self) -> Result<u64> {
+        Ok(self.clock.now()?)
+    }
+
+    pub fn progress(&mut self) -> Result<f64> {
+        Ok(self.clock.progress()?)
+    }
+
     pub fn is_finished(&self) -> bool {
         self.lanes
             .values()

@@ -6,5 +6,8 @@ pub mod event;
 pub mod producer;
 pub mod reader_cursor;
 
-pub use controller::{ReplayController, ReplayHandler};
+pub use controller::{
+    ReplayCommand, ReplayControl, ReplayController, ReplayHandler, ReplayRunReport,
+    ReplayRuntimeState, ReplayStatusReporter, ReplayStatusSnapshot,
+};
 pub use event::ReplayEvent;

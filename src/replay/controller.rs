@@ -15,12 +15,15 @@
 //!    - 驱动主循环定时tick，不断从 coordinator 取出当前可安全发出的事件
 //!    - 汇总整次回放的统计信息并形成最终报告
 //!
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Error as AnyhowError;
 use async_trait::async_trait;
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+use serde::Serialize;
 use thiserror::Error;
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::config::{DbConfig, ReplayConfig};
@@ -36,12 +39,170 @@ use super::event::ReplayEvent;
 
 pub type Result<T> = std::result::Result<T, ReplayControllerError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayStopReason {
-    Finished,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayCommand {
+    Pause,
+    Resume,
+    Stop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRuntimeState {
+    Idle,
+    Running,
+    Paused,
+    Stopping,
+    Finished,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReplayStatusSnapshot {
+    pub state: ReplayRuntimeState,
+    pub sim_now_ms: Option<u64>,
+    pub progress: Option<f64>,
+    pub current_day: Option<String>,
+    pub ticks: usize,
+    pub total_events: usize,
+    pub max_lag_ms: u64,
+    pub final_lag_ms: Option<u64>,
+    pub error_message: Option<String>,
+    pub report: Option<ReplayRunReport>,
+}
+
+impl Default for ReplayStatusSnapshot {
+    fn default() -> Self {
+        Self {
+            state: ReplayRuntimeState::Idle,
+            sim_now_ms: None,
+            progress: None,
+            current_day: None,
+            ticks: 0,
+            total_events: 0,
+            max_lag_ms: 0,
+            final_lag_ms: None,
+            error_message: None,
+            report: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ReplayStatusReporter {
+    status: Arc<RwLock<ReplayStatusSnapshot>>,
+}
+
+impl ReplayStatusReporter {
+    pub fn new(status: Arc<RwLock<ReplayStatusSnapshot>>) -> Self {
+        Self { status }
+    }
+
+    pub async fn snapshot(&self) -> ReplayStatusSnapshot {
+        self.status.read().await.clone()
+    }
+
+    pub async fn set_status(&self, snapshot: ReplayStatusSnapshot) {
+        *self.status.write().await = snapshot;
+    }
+
+    pub async fn update_running(
+        &self,
+        current_day: String,
+        sim_now_ms: u64,
+        progress: f64,
+        ticks: usize,
+        total_events: usize,
+        max_lag_ms: u64,
+        final_lag_ms: u64,
+    ) {
+        let mut guard = self.status.write().await;
+        guard.state = ReplayRuntimeState::Running;
+        guard.sim_now_ms = Some(sim_now_ms);
+        guard.progress = Some(progress);
+        guard.current_day = Some(current_day);
+        guard.ticks = ticks;
+        guard.total_events = total_events;
+        guard.max_lag_ms = max_lag_ms;
+        guard.final_lag_ms = Some(final_lag_ms);
+        guard.error_message = None;
+    }
+
+    pub async fn mark_paused(
+        &self,
+        current_day: String,
+        sim_now_ms: u64,
+        progress: f64,
+        ticks: usize,
+        total_events: usize,
+        max_lag_ms: u64,
+        final_lag_ms: Option<u64>,
+    ) {
+        let mut guard = self.status.write().await;
+        guard.state = ReplayRuntimeState::Paused;
+        guard.sim_now_ms = Some(sim_now_ms);
+        guard.progress = Some(progress);
+        guard.current_day = Some(current_day);
+        guard.ticks = ticks;
+        guard.total_events = total_events;
+        guard.max_lag_ms = max_lag_ms;
+        guard.final_lag_ms = final_lag_ms;
+    }
+
+    pub async fn mark_stopping(
+        &self,
+        current_day: String,
+        sim_now_ms: u64,
+        progress: f64,
+        ticks: usize,
+        total_events: usize,
+        max_lag_ms: u64,
+        final_lag_ms: Option<u64>,
+    ) {
+        let mut guard = self.status.write().await;
+        guard.state = ReplayRuntimeState::Stopping;
+        guard.sim_now_ms = Some(sim_now_ms);
+        guard.progress = Some(progress);
+        guard.current_day = Some(current_day);
+        guard.ticks = ticks;
+        guard.total_events = total_events;
+        guard.max_lag_ms = max_lag_ms;
+        guard.final_lag_ms = final_lag_ms;
+    }
+
+    pub async fn mark_finished(&self, report: ReplayRunReport) {
+        let mut guard = self.status.write().await;
+        guard.state = ReplayRuntimeState::Finished;
+        guard.sim_now_ms = None;
+        guard.progress = Some(1.0);
+        guard.current_day = report.daily_reports.last().map(|r| r.day.clone());
+        guard.ticks = report.ticks;
+        guard.total_events = report.total_events;
+        guard.max_lag_ms = report.max_lag_ms;
+        guard.final_lag_ms = Some(report.final_lag_ms);
+        guard.error_message = None;
+        guard.report = Some(report);
+    }
+
+    pub async fn mark_failed(&self, error_message: String) {
+        let mut guard = self.status.write().await;
+        guard.state = ReplayRuntimeState::Failed;
+        guard.error_message = Some(error_message);
+    }
+}
+
+pub struct ReplayControl {
+    pub command_rx: mpsc::UnboundedReceiver<ReplayCommand>,
+    pub status_reporter: ReplayStatusReporter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ReplayStopReason {
+    Finished,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReplayReport {
     pub day: String,
     pub ticks: usize,
@@ -58,7 +219,7 @@ pub struct ReplayReport {
     pub stop_reason: ReplayStopReason,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReplayRunReport {
     pub start_date: String,
     pub end_date: String,
@@ -140,6 +301,7 @@ enum SingleDayReplayOutcome {
     Report {
         report: ReplayReport,
         total_lag_ms: u128,
+        stopped: bool,
     },
 }
 
@@ -152,6 +314,17 @@ impl ReplayController {
     }
 
     pub async fn replay<H>(&self, handler: &mut H) -> Result<ReplayRunReport>
+    where
+        H: ReplayHandler,
+    {
+        self.replay_with_control(handler, None).await
+    }
+
+    pub async fn replay_with_control<H>(
+        &self,
+        handler: &mut H,
+        mut control: Option<ReplayControl>,
+    ) -> Result<ReplayRunReport>
     where
         H: ReplayHandler,
     {
@@ -173,6 +346,7 @@ impl ReplayController {
         let mut total_reader_build_elapsed_ms = 0u128;
         let mut total_bootstrap_elapsed_ms = 0u128;
         let mut total_wall_elapsed_ms = 0u128;
+        let mut stop_reason = ReplayStopReason::Finished;
 
         for daily_window in daily_windows {
             match self
@@ -181,6 +355,7 @@ impl ReplayController {
                     &daily_window,
                     self.replay_config.replay_speed,
                     handler,
+                    control.as_mut(),
                 )
                 .await?
             {
@@ -194,6 +369,7 @@ impl ReplayController {
                 SingleDayReplayOutcome::Report {
                     report,
                     total_lag_ms: day_total_lag_ms,
+                    stopped,
                 } => {
                     total_ticks += report.ticks;
                     total_events += report.total_events;
@@ -207,11 +383,16 @@ impl ReplayController {
                     total_wall_elapsed_ms += report.wall_elapsed_ms;
 
                     daily_reports.push(report);
+
+                    if stopped {
+                        stop_reason = ReplayStopReason::Stopped;
+                        break;
+                    }
                 }
             }
         }
 
-        Ok(ReplayRunReport {
+        let report = ReplayRunReport {
             start_date: self
                 .replay_config
                 .replay_start_date
@@ -246,8 +427,14 @@ impl ReplayController {
             total_bootstrap_elapsed_ms,
             total_wall_elapsed_ms,
             total_elapsed_ms: total_start.elapsed().as_millis(),
-            stop_reason: ReplayStopReason::Finished,
-        })
+            stop_reason,
+        };
+
+        if let Some(control) = control.as_ref() {
+            control.status_reporter.mark_finished(report.clone()).await;
+        }
+
+        Ok(report)
     }
 
     async fn replay_single_day<H>(
@@ -256,6 +443,7 @@ impl ReplayController {
         daily_window: &DailyReplayWindow,
         replay_speed: f64,
         handler: &mut H,
+        mut control: Option<&mut ReplayControl>,
     ) -> Result<SingleDayReplayOutcome>
     where
         H: ReplayHandler,
@@ -330,13 +518,48 @@ impl ReplayController {
         let mut max_lag_ms = 0u64;
         let mut total_lag_ms = 0u128;
         let mut final_lag_ms = None;
+        let mut stopped = false;
         loop {
+            if let Some(control) = control.as_mut() {
+                if self
+                    .handle_control_before_tick(
+                        &mut coordinator,
+                        &daily_window.day,
+                        control,
+                        tick_count,
+                        total_events,
+                        max_lag_ms,
+                        final_lag_ms,
+                    )
+                    .await?
+                {
+                    stopped = true;
+                    break;
+                }
+            }
+
             tick.tick().await;
             let result = coordinator.poll_ready_events().await?;
             tick_count += 1;
             max_lag_ms = max_lag_ms.max(result.lag_ms);
             total_lag_ms += u128::from(result.lag_ms);
             final_lag_ms = Some(result.lag_ms);
+
+            if let Some(control) = control.as_mut() {
+                let progress = coordinator.progress()?;
+                control
+                    .status_reporter
+                    .update_running(
+                        daily_window.day.clone(),
+                        result.sim_now_ms,
+                        progress,
+                        tick_count,
+                        total_events + result.events.len(),
+                        max_lag_ms,
+                        result.lag_ms,
+                    )
+                    .await;
+            }
 
             let (order_rows, transaction_rows) = count_event_rows(&result.events);
             total_events += result.events.len();
@@ -370,9 +593,108 @@ impl ReplayController {
                 bootstrap_elapsed_ms: bootstrap_elapsed.as_millis(),
                 wall_elapsed_ms: run_start.elapsed().as_millis(),
                 total_elapsed_ms: total_start.elapsed().as_millis(),
-                stop_reason: ReplayStopReason::Finished,
+                stop_reason: if stopped {
+                    ReplayStopReason::Stopped
+                } else {
+                    ReplayStopReason::Finished
+                },
             },
+            stopped,
         })
+    }
+
+    async fn handle_control_before_tick(
+        &self,
+        coordinator: &mut ReplayCoordinator,
+        current_day: &str,
+        control: &mut ReplayControl,
+        tick_count: usize,
+        total_events: usize,
+        max_lag_ms: u64,
+        final_lag_ms: Option<u64>,
+    ) -> Result<bool> {
+        while let Ok(command) = control.command_rx.try_recv() {
+            match command {
+                ReplayCommand::Pause => {
+                    coordinator.pause_clock()?;
+                    let sim_now_ms = coordinator.current_sim_now()?;
+                    let progress = coordinator.progress()?;
+                    control
+                        .status_reporter
+                        .mark_paused(
+                            current_day.to_string(),
+                            sim_now_ms,
+                            progress,
+                            tick_count,
+                            total_events,
+                            max_lag_ms,
+                            final_lag_ms,
+                        )
+                        .await;
+
+                    loop {
+                        match control.command_rx.recv().await {
+                            Some(ReplayCommand::Resume) => {
+                                coordinator.resume_clock()?;
+                                let sim_now_ms = coordinator.current_sim_now()?;
+                                let progress = coordinator.progress()?;
+                                control
+                                    .status_reporter
+                                    .update_running(
+                                        current_day.to_string(),
+                                        sim_now_ms,
+                                        progress,
+                                        tick_count,
+                                        total_events,
+                                        max_lag_ms,
+                                        final_lag_ms.unwrap_or(0),
+                                    )
+                                    .await;
+                                break;
+                            }
+                            Some(ReplayCommand::Stop) | None => {
+                                let sim_now_ms = coordinator.current_sim_now()?;
+                                let progress = coordinator.progress()?;
+                                control
+                                    .status_reporter
+                                    .mark_stopping(
+                                        current_day.to_string(),
+                                        sim_now_ms,
+                                        progress,
+                                        tick_count,
+                                        total_events,
+                                        max_lag_ms,
+                                        final_lag_ms,
+                                    )
+                                    .await;
+                                return Ok(true);
+                            }
+                            Some(ReplayCommand::Pause) => {}
+                        }
+                    }
+                }
+                ReplayCommand::Resume => {}
+                ReplayCommand::Stop => {
+                    let sim_now_ms = coordinator.current_sim_now()?;
+                    let progress = coordinator.progress()?;
+                    control
+                        .status_reporter
+                        .mark_stopping(
+                            current_day.to_string(),
+                            sim_now_ms,
+                            progress,
+                            tick_count,
+                            total_events,
+                            max_lag_ms,
+                            final_lag_ms,
+                        )
+                        .await;
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
 

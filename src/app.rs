@@ -11,7 +11,11 @@ use crate::common::{L2Order, Market, OrderType};
 use crate::config::AppConfig;
 use crate::matcher::order_book::{LevelSnapshot, OrderBook, OrderBookSnapshot};
 use crate::publisher::NatsDispatcher;
-use crate::replay::{ReplayController, ReplayEvent, ReplayHandler};
+use crate::replay::{
+    ReplayControl, ReplayController, ReplayEvent, ReplayHandler, ReplayRunReport,
+    ReplayStatusReporter,
+};
+use tokio::sync::mpsc;
 
 struct OrderBookSnapshotHandler {
     tracked_codes: Option<HashSet<String>>,
@@ -192,11 +196,36 @@ impl ReplayHandler for OrderBookSnapshotHandler {
 }
 
 pub async fn run(config: AppConfig) -> Result<()> {
+    run_internal(config, None).await.map(|_| ())
+}
+
+pub async fn run_with_control(
+    config: AppConfig,
+    command_rx: mpsc::UnboundedReceiver<crate::replay::ReplayCommand>,
+    status_reporter: ReplayStatusReporter,
+) -> Result<ReplayRunReport> {
+    run_internal(
+        config,
+        Some(ReplayControl {
+            command_rx,
+            status_reporter,
+        }),
+    )
+    .await
+}
+
+async fn run_internal(
+    config: AppConfig,
+    control: Option<ReplayControl>,
+) -> Result<ReplayRunReport> {
     let csv_output_path = config.replay.snapshot_csv_path.clone();
     let write_snapshot_csv = config.replay.write_snapshot_csv;
     let writer = if write_snapshot_csv {
         let output_path = Path::new(&csv_output_path);
-        if let Some(parent) = output_path.parent() {
+        if let Some(parent) = output_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent).context("failed to create csv output directory")?;
         }
         let output_file = File::create(output_path)
@@ -248,7 +277,9 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let mut handler =
         OrderBookSnapshotHandler::new(tracked_codes, snapshot_depth, writer, dispatcher);
 
-    let report = controller.replay(&mut handler).await?;
+    let report = controller
+        .replay_with_control(&mut handler, control)
+        .await?;
     handler.flush().await?;
     info!(
         ticks = report.ticks,
@@ -262,5 +293,5 @@ pub async fn run(config: AppConfig) -> Result<()> {
         total_elapsed_ms = report.total_elapsed_ms,
         "replay finished"
     );
-    Ok(())
+    Ok(report)
 }

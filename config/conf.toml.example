@@ -39,6 +39,10 @@ replay_speed = 1.0
 url = "nats://127.0.0.1:4222"
 subject = "market.snapshot"
 
+[web]
+host = "127.0.0.1"
+port = 5800
+
 [logging]
 level = "info"
 directory = "logs"

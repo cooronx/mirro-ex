@@ -7,7 +7,9 @@ mod marketdata;
 mod matcher;
 mod publisher;
 mod replay;
+mod replay_manager;
 mod sim_clock;
+mod web;
 
 use anyhow::Result;
 use tracing::error;
@@ -19,7 +21,7 @@ async fn main() -> Result<()> {
     let config = AppConfig::load()?;
     let _logging_guard = logging::init(&config.logging)?;
 
-    if let Err(err) = app::run(config).await {
+    if let Err(err) = web::serve(config).await {
         let mut chain = err.to_string();
         let mut source = err.source();
         while let Some(cause) = source {

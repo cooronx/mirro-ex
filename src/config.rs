@@ -6,7 +6,7 @@ use chrono::{NaiveDate, NaiveTime};
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
-const DEFAULT_CONFIG_PATH: &str = "config/conf.toml";
+pub const DEFAULT_CONFIG_PATH: &str = "config/conf.toml";
 const REPLAY_DATE_FORMAT: &str = "%Y-%m-%d";
 const REPLAY_TIME_FORMAT_WITH_MILLISECONDS: &str = "%H:%M:%S%.3f";
 const REPLAY_TIME_FORMAT_WITHOUT_MILLISECONDS: &str = "%H:%M:%S";
@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub db: DbConfig,
     pub replay: ReplayConfig,
     pub nats: NatsConfig,
+    #[serde(default)]
+    pub web: WebConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
 }
@@ -69,6 +71,13 @@ pub struct ReplayConfig {
 pub struct NatsConfig {
     pub url: String,
     pub subject: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct WebConfig {
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -128,6 +137,14 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_web_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_web_port() -> u16 {
+    5800
+}
+
 fn default_log_directory() -> String {
     "logs".to_string()
 }
@@ -148,6 +165,15 @@ impl Default for LoggingConfig {
             file_prefix: default_log_file_prefix(),
             to_stdout: default_true(),
             to_file: default_true(),
+        }
+    }
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            host: default_web_host(),
+            port: default_web_port(),
         }
     }
 }
