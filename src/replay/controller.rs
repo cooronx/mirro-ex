@@ -1,3 +1,20 @@
+//!
+//! replay总入口模块。
+//! 1. 输入：
+//!    - 数据库配置 `DbConfig`
+//!    - 回放配置 `ReplayConfig`
+//!    - 上层提供的 `ReplayHandler`
+//!
+//! 2. 输出：
+//!    - 按模拟时间节奏切好的 `ReplayEvent` 批次会被持续交给 `ReplayHandler::on_events()`
+//!    - 回放结束后返回一份 `ReplayRunReport`
+//!
+//! 3. 逻辑：
+//!    - 根据日期和时间窗构造查询条件
+//!    - 创建 `ReplayDbReader`、`SimClock` 和 `ReplayCoordinator`
+//!    - 驱动主循环定时tick，不断从 coordinator 取出当前可安全发出的事件
+//!    - 汇总整次回放的统计信息并形成最终报告
+//!
 use std::time::Instant;
 
 use anyhow::Error as AnyhowError;

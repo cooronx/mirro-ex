@@ -1,3 +1,18 @@
+//!
+//! replay读取游标定义模块。
+//! 1. 输入：
+//!    - 单个 source 的基础属性，例如 `day / market / data_kind / channel`
+//!    - 该 source 在本次回放窗口内的 message range
+//!
+//! 2. 输出：
+//!    - `ChannelRange`：描述一条 source 在本次回放中的静态范围
+//!    - `ReaderCursor`：描述这条 source 当前已经读到哪里
+//!
+//! 3. 逻辑：
+//!    - 统一描述 replay 里的“单条数据流”
+//!    - 给 `ReplayDbReader`、producer 和 lane 之间传递读取边界与推进进度
+//!    - 提供委托/成交统一的数据类型标记 `ReplayDataKind`
+//!
 use crate::common::Market;
 
 /// 回放数据类型。

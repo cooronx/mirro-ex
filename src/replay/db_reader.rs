@@ -1,3 +1,21 @@
+//!
+//! 数据库批量读取模块。
+//! 1. 输入：
+//!    - ClickHouse 连接池 `DbPool`
+//!    - 各市场各表的 message range 查询结果
+//!    - 每条 source 当前的读取游标 `ReaderCursor`
+//!    - 批大小 `batch_size`
+//!
+//! 2. 输出：
+//!    - 若干个 `FetchedBatch`
+//!    - 每个 batch 对应一个 source 在某个 message range 内的统一事件列表
+//!
+//! 3. 逻辑：
+//!    - 把查询阶段得到的 channel/message range 转成 `ReaderCursor`
+//!    - 维护每条 source 当前已经读取到哪里
+//!    - 按 round-robin 方式为多个 cursor 规划下一批读取任务
+//!    - 从 ClickHouse 拉取委托/成交明细，并统一封装成 `ReplayEvent`
+//!
 use clickhouse::{Row, sql::Identifier};
 use serde::Deserialize;
 use thiserror::Error;

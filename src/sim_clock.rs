@@ -1,13 +1,18 @@
-/**
- * 一个简单的模拟时钟
- * 1. start()的时候，将当前真实时间写入real_anchor_time，将模拟时段的起点写入sim_anchor_ms
- * 2. now()的时候，先判断状态是不是running，如果是就按照如下公式计算
- * real_elapsed = Instant::now() - real_anchor_time
- * sim_elapsed = real_elapsed * speed
- * sim_now = sim_anchor_ms + sim_elapsed
- * 3.如果 pause()，就先算一次当前 now，把它写回 sim_anchor_ms，然后清掉 real_anchor_time，状态改成 Paused
- * 4.如果 resume()，就重新记一个新的 real_anchor_time = Instant::now()，但 sim_anchor_ms 不变，所以会从暂停点继续往前走。
- */
+//!
+//! 一个简单的模拟时钟
+//! 1. start()的时候，将当前真实时间写入real_anchor_time，将模拟时段的起点写入sim_anchor_ms
+//! 2. now()的时候，先判断状态是不是running，如果是就按照如下公式计算
+//! 
+//! real_elapsed = Instant::now() - real_anchor_time
+//! 
+//! sim_elapsed = real_elapsed * speed
+//! 
+//! sim_now = sim_anchor_ms + sim_elapsed
+//! 
+//! 3.如果 pause()，就先算一次当前 now，把它写回 sim_anchor_ms，然后清掉 real_anchor_time，状态改成 Paused
+//! 
+//! 4.如果 resume()，就重新记一个新的 real_anchor_time = Instant::now()，但 sim_anchor_ms 不变，所以会从暂停点继续往前走。
+//!
 use std::time::Instant;
 
 use chrono::{DateTime, FixedOffset, NaiveTime, TimeZone, Utc};
@@ -76,6 +81,11 @@ pub struct SimClock {
 }
 
 impl SimClock {
+    /// 创建一个新的模拟时钟。
+    ///
+    /// `sim_start_ms` 和 `sim_end_ms` 使用 Unix 毫秒时间戳表示模拟区间；
+    /// `speed` 表示模拟时间相对真实时间的推进倍率；
+    /// `skip_intraday_breaks` 控制是否跳过盘中非连续交易时段。
     pub fn new(
         sim_start_ms: u64,
         sim_end_ms: u64,
@@ -96,42 +106,66 @@ impl SimClock {
         })
     }
 
+    /// 启动模拟时钟。
+    ///
+    /// 启动后时钟进入 [`SimClockState::Running`]，
+    /// 后续 [`Self::now`] 会开始按倍率推进模拟时间。
     pub fn start(&mut self) -> Result<()> {
         self.start_impl(Instant::now())
     }
 
+    /// 暂停模拟时钟。
+    ///
+    /// 暂停时会先结算一次当前模拟时间，并把该时间写回锚点，
+    /// 后续再次恢复时会从这个暂停点继续推进。
     pub fn pause(&mut self) -> Result<()> {
         self.pause_impl(Instant::now())
     }
 
+    /// 恢复一个已暂停的模拟时钟。
+    ///
+    /// 恢复后时钟重新进入 [`SimClockState::Running`]，
+    /// 并从最近一次暂停时的模拟时间继续推进。
     pub fn resume(&mut self) -> Result<()> {
         self.resume_impl(Instant::now())
     }
 
-    /**
-     * 返回当前模拟的unix毫秒时间戳
-     */
+    /// 返回当前模拟时间对应的 Unix 毫秒时间戳。
+    ///
+    /// 当时钟处于：
+    /// - [`SimClockState::Ready`]：返回规范化后的起始时间；
+    /// - [`SimClockState::Running`]：按当前倍率计算出的实时模拟时间；
+    /// - [`SimClockState::Paused`]：返回暂停时刻；
+    /// - [`SimClockState::Finished`]：返回模拟终点。
     pub fn now(&mut self) -> Result<u64> {
         self.now_at(Instant::now())
     }
 
+    /// 返回当前模拟进度，范围固定为 `[0.0, 1.0]`。
+    ///
+    /// 当启用了 `skip_intraday_breaks` 时，
+    /// 进度只按连续交易时段的有效时长计算。
     pub fn progress(&mut self) -> Result<f64> {
         let sim_ms = self.now()?;
         Ok(self.progress_for(sim_ms))
     }
 
+    /// 返回当前配置的模拟时间推进倍率。
     pub fn speed(&self) -> f64 {
         self.speed
     }
 
+    /// 返回当前模拟时钟状态。
     pub fn state(&self) -> SimClockState {
         self.state
     }
 
+    /// 返回模拟区间起点的 Unix 毫秒时间戳。
     pub fn sim_start_ms(&self) -> u64 {
         self.sim_start_ms
     }
 
+    /// 返回模拟区间终点的 Unix 毫秒时间戳。
     pub fn sim_end_ms(&self) -> u64 {
         self.sim_end_ms
     }
