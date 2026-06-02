@@ -7,3 +7,4 @@ data/
 __pycache__
 logs/
 .clickhouse/
+scripts/migrate_code_day.py
