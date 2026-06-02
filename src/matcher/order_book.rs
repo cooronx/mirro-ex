@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use thiserror::Error;
+use tracing::warn;
 
 use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
 
@@ -16,6 +17,14 @@ enum BookSide {
 struct PriceLevel {
     orders: VecDeque<OrderId>,
     total_qty: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HoldingOrder {
+    order: L2Order,
+    remaining_volume: i64,
+    resting_price: Option<i64>,
+    has_trade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +65,7 @@ pub struct OrderBook {
     bids: BTreeMap<i64, PriceLevel>,
     asks: BTreeMap<i64, PriceLevel>,
     order_hash: HashMap<OrderId, L2Order>,
+    holding_orders: HashMap<OrderId, HoldingOrder>,
     pending_cancels: HashMap<OrderId, i64>,
     pending_reductions: HashMap<OrderId, i64>,
 }
@@ -66,8 +76,14 @@ impl OrderBook {
     }
 
     pub fn apply_order(&mut self, order: L2Order) -> Result<()> {
+        if order.market == Market::XSHE {
+            self.finalize_traded_holdings()?;
+        }
+
         match order.order_type {
             OrderType::Limit => self.submit_limit_order(order),
+            OrderType::BestOwn => self.submit_best_own_order(order),
+            OrderType::Market => self.submit_holding_market_order(order),
             OrderType::Cancel => {
                 if order.market != Market::XSHG {
                     return Err(OrderBookError::UnexpectedOrderStreamCancel(order.market));
@@ -109,12 +125,7 @@ impl OrderBook {
                     self.cancel_transaction_orders(&transaction);
                 }
                 "F" => {
-                    if transaction.buy_number > 0 {
-                        self.reduce_order(transaction.buy_number, transaction.volume);
-                    }
-                    if transaction.sell_number > 0 {
-                        self.reduce_order(transaction.sell_number, transaction.volume);
-                    }
+                    self.process_shenzhen_trade(&transaction);
                 }
                 _ => {
                     return Err(OrderBookError::UnexpectedTransactionStreamCancel(
@@ -167,6 +178,24 @@ impl OrderBook {
         self.best_price(BookSide::Ask)
     }
 
+    pub fn has_unsettled_holdings(&self) -> bool {
+        !self.holding_orders.is_empty()
+    }
+
+    pub fn finalize_all_holdings(&mut self) -> Result<bool> {
+        let holding_ids = self.holding_orders.keys().copied().collect::<Vec<_>>();
+        self.finalize_holdings(&holding_ids)
+    }
+
+    fn finalize_traded_holdings(&mut self) -> Result<bool> {
+        let holding_ids = self
+            .holding_orders
+            .iter()
+            .filter_map(|(&order_id, holding)| holding.has_trade.then_some(order_id))
+            .collect::<Vec<_>>();
+        self.finalize_holdings(&holding_ids)
+    }
+
     fn submit_limit_order(&mut self, order: L2Order) -> Result<()> {
         let order_id = Self::order_id(&order);
         let mut order = order;
@@ -188,8 +217,13 @@ impl OrderBook {
             return Err(OrderBookError::InvalidOrderVolume(order.volume));
         }
 
+        self.insert_visible_order(order)
+    }
+
+    fn insert_visible_order(&mut self, order: L2Order) -> Result<()> {
+        let order_id = Self::order_id(&order);
         let side = Self::book_side_for_direction(order.direction)?;
-        if self.order_hash.contains_key(&order_id) {
+        if self.contains_order_id(order_id) {
             return Err(OrderBookError::DuplicateOrderId(order_id));
         }
 
@@ -200,48 +234,95 @@ impl OrderBook {
         Ok(())
     }
 
+    fn submit_best_own_order(&mut self, mut order: L2Order) -> Result<()> {
+        let Some(price) = self.best_own_price(order.direction)? else {
+            return Ok(());
+        };
+
+        order.price = price;
+        order.order_type = OrderType::Limit;
+        self.submit_limit_order(order)
+    }
+
+    fn submit_holding_market_order(&mut self, order: L2Order) -> Result<()> {
+        let order_id = Self::order_id(&order);
+        let mut order = order;
+        let pending_cancel = self.pending_cancels.remove(&order_id).unwrap_or(0);
+        let pending_reduction = if order.market == Market::XSHG {
+            0
+        } else {
+            self.pending_reductions.remove(&order_id).unwrap_or(0)
+        };
+        let total_pending = pending_cancel.saturating_add(pending_reduction);
+        if total_pending > 0 {
+            if total_pending >= order.volume {
+                return Ok(());
+            }
+            order.volume -= total_pending;
+        }
+
+        if order.volume <= 0 {
+            return Err(OrderBookError::InvalidOrderVolume(order.volume));
+        }
+
+        if self.contains_order_id(order_id) {
+            return Err(OrderBookError::DuplicateOrderId(order_id));
+        }
+
+        self.holding_orders.insert(
+            order_id,
+            HoldingOrder {
+                remaining_volume: order.volume,
+                order,
+                resting_price: None,
+                has_trade: false,
+            },
+        );
+        Ok(())
+    }
+
     fn reduce_order(&mut self, order_id: OrderId, matched_qty: i64) -> i64 {
-        let Some((side, price, remaining_qty)) = self.order_hash.get(&order_id).map(|order| {
+        if let Some((side, price, remaining_qty)) = self.order_hash.get(&order_id).map(|order| {
             (
                 Self::book_side_for_direction(order.direction).ok(),
                 order.price,
                 order.volume,
             )
-        }) else {
-            self.pending_reductions
-                .entry(order_id)
-                .and_modify(|value| *value = value.saturating_add(matched_qty))
-                .or_insert(matched_qty);
-            return 0;
-        };
+        }) {
+            let Some(side) = side else {
+                return 0;
+            };
 
-        let Some(side) = side else {
-            return 0;
-        };
+            let reduced_qty = remaining_qty.min(matched_qty);
+            if reduced_qty <= 0 {
+                return 0;
+            }
 
-        let reduced_qty = remaining_qty.min(matched_qty);
-        if reduced_qty <= 0 {
-            return 0;
+            let remove_order = if let Some(order) = self.order_hash.get_mut(&order_id) {
+                order.volume -= reduced_qty;
+                order.volume <= 0
+            } else {
+                false
+            };
+
+            if remove_order {
+                self.order_hash.remove(&order_id);
+            }
+
+            self.adjust_level_total_qty(side, price, reduced_qty);
+            self.remove_empty_level_if_drained(side, price);
+            return reduced_qty;
         }
 
-        let remove_order = if let Some(order) = self.order_hash.get_mut(&order_id) {
-            order.volume -= reduced_qty;
-            order.volume <= 0
-        } else {
-            false
-        };
-
-        if remove_order {
-            self.order_hash.remove(&order_id);
-        }
-
-        self.adjust_level_total_qty(side, price, reduced_qty);
-        self.remove_empty_level_if_drained(side, price);
-        reduced_qty
+        self.pending_reductions
+            .entry(order_id)
+            .and_modify(|value| *value = value.saturating_add(matched_qty))
+            .or_insert(matched_qty);
+        0
     }
 
     fn reduce_order_if_present(&mut self, order_id: OrderId, matched_qty: i64) -> i64 {
-        if self.order_hash.contains_key(&order_id) {
+        if self.contains_order_id(order_id) {
             self.reduce_order(order_id, matched_qty)
         } else {
             0
@@ -299,43 +380,56 @@ impl OrderBook {
     }
 
     fn cancel_order_volume(&mut self, order_id: OrderId, cancel_qty: i64) -> i64 {
-        let Some((side, price, remaining_qty)) = self.order_hash.get(&order_id).map(|order| {
+        if let Some((side, price, remaining_qty)) = self.order_hash.get(&order_id).map(|order| {
             (
                 Self::book_side_for_direction(order.direction).ok(),
                 order.price,
                 order.volume,
             )
-        }) else {
-            self.pending_cancels
-                .entry(order_id)
-                .and_modify(|value| *value = value.saturating_add(cancel_qty))
-                .or_insert(cancel_qty);
-            return 0;
-        };
+        }) {
+            let Some(side) = side else {
+                return 0;
+            };
 
-        let Some(side) = side else {
-            return 0;
-        };
+            let reduced_qty = remaining_qty.min(cancel_qty);
+            if reduced_qty <= 0 {
+                return 0;
+            }
 
-        let reduced_qty = remaining_qty.min(cancel_qty);
-        if reduced_qty <= 0 {
-            return 0;
+            let remove_order = if let Some(order) = self.order_hash.get_mut(&order_id) {
+                order.volume -= reduced_qty;
+                order.volume <= 0
+            } else {
+                false
+            };
+
+            if remove_order {
+                self.order_hash.remove(&order_id);
+            }
+
+            self.adjust_level_total_qty(side, price, reduced_qty);
+            self.remove_empty_level_if_drained(side, price);
+            return reduced_qty;
         }
 
-        let remove_order = if let Some(order) = self.order_hash.get_mut(&order_id) {
-            order.volume -= reduced_qty;
-            order.volume <= 0
-        } else {
-            false
-        };
+        if let Some(holding) = self.holding_orders.get_mut(&order_id) {
+            let reduced_qty = holding.remaining_volume.min(cancel_qty);
+            if reduced_qty <= 0 {
+                return 0;
+            }
 
-        if remove_order {
-            self.order_hash.remove(&order_id);
+            holding.remaining_volume -= reduced_qty;
+            if holding.remaining_volume <= 0 {
+                self.holding_orders.remove(&order_id);
+            }
+            return reduced_qty;
         }
 
-        self.adjust_level_total_qty(side, price, reduced_qty);
-        self.remove_empty_level_if_drained(side, price);
-        reduced_qty
+        self.pending_cancels
+            .entry(order_id)
+            .and_modify(|value| *value = value.saturating_add(cancel_qty))
+            .or_insert(cancel_qty);
+        0
     }
 
     fn adjust_level_total_qty(&mut self, side: BookSide, price: i64, delta: i64) {
@@ -433,6 +527,131 @@ impl OrderBook {
             order_count,
         })
     }
+
+    fn contains_order_id(&self, order_id: OrderId) -> bool {
+        self.order_hash.contains_key(&order_id) || self.holding_orders.contains_key(&order_id)
+    }
+
+    fn best_own_price(&mut self, direction: OrderDirection) -> Result<Option<i64>> {
+        match direction {
+            OrderDirection::Buy => Ok(self.best_bid_price()),
+            OrderDirection::Sell => Ok(self.best_ask_price()),
+            other => Err(OrderBookError::UnsupportedDirection(other)),
+        }
+    }
+
+    fn process_shenzhen_trade(&mut self, transaction: &L2Transaction) {
+        let referenced_ids = Self::referenced_order_ids(transaction);
+        let holding_ids = self.holding_orders.keys().copied().collect::<Vec<_>>();
+        let finalized_ids = holding_ids
+            .into_iter()
+            .filter(|order_id| !referenced_ids.contains(order_id))
+            .collect::<Vec<_>>();
+        let _ = self.finalize_holdings(&finalized_ids);
+
+        if transaction.buy_number > 0 {
+            self.reduce_order_with_trade_price(
+                transaction.buy_number,
+                transaction.volume,
+                transaction.price,
+            );
+        }
+        if transaction.sell_number > 0 {
+            self.reduce_order_with_trade_price(
+                transaction.sell_number,
+                transaction.volume,
+                transaction.price,
+            );
+        }
+    }
+
+    fn reduce_order_with_trade_price(
+        &mut self,
+        order_id: OrderId,
+        matched_qty: i64,
+        trade_price: i64,
+    ) -> i64 {
+        if self.order_hash.contains_key(&order_id) {
+            return self.reduce_order(order_id, matched_qty);
+        }
+
+        if let Some(holding) = self.holding_orders.get_mut(&order_id) {
+            let reduced_qty = holding.remaining_volume.min(matched_qty);
+            if reduced_qty <= 0 {
+                return 0;
+            }
+
+            if holding.resting_price.is_none() {
+                holding.resting_price = Some(trade_price);
+            }
+            holding.has_trade = true;
+            holding.remaining_volume -= reduced_qty;
+            if holding.remaining_volume <= 0 {
+                self.holding_orders.remove(&order_id);
+            }
+            return reduced_qty;
+        }
+
+        self.pending_reductions
+            .entry(order_id)
+            .and_modify(|value| *value = value.saturating_add(matched_qty))
+            .or_insert(matched_qty);
+        0
+    }
+
+    fn finalize_holdings(&mut self, holding_ids: &[OrderId]) -> Result<bool> {
+        let mut changed = false;
+
+        for order_id in holding_ids {
+            let Some(holding) = self.holding_orders.remove(order_id) else {
+                continue;
+            };
+
+            if holding.remaining_volume <= 0 {
+                continue;
+            }
+
+            if !holding.has_trade {
+                warn!(
+                    order_id = *order_id,
+                    code = %holding.order.code,
+                    market = ?holding.order.market,
+                    "dropping shenzhen market order without any following matching trades"
+                );
+                continue;
+            }
+
+            let Some(resting_price) = holding.resting_price else {
+                warn!(
+                    order_id = *order_id,
+                    code = %holding.order.code,
+                    market = ?holding.order.market,
+                    "dropping shenzhen market order with residual volume but no resting price"
+                );
+                continue;
+            };
+
+            let mut visible_order = holding.order;
+            visible_order.price = resting_price;
+            visible_order.volume = holding.remaining_volume;
+            visible_order.order_type = OrderType::Limit;
+            self.insert_visible_order(visible_order)?;
+            changed = true;
+        }
+
+        Ok(changed)
+    }
+
+    fn referenced_order_ids(transaction: &L2Transaction) -> Vec<OrderId> {
+        let mut order_ids = Vec::with_capacity(2);
+        if transaction.buy_number > 0 {
+            order_ids.push(transaction.buy_number);
+        }
+        if transaction.sell_number > 0 && transaction.sell_number != transaction.buy_number {
+            order_ids.push(transaction.sell_number);
+        }
+        order_ids
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +727,27 @@ mod tests {
             buy_number: order_number,
             sell_number: 0,
             deal_type: "4".to_string(),
+        }
+    }
+
+    fn shenzhen_order(
+        order_id: i64,
+        direction: OrderDirection,
+        price: i64,
+        volume: i64,
+        order_type: OrderType,
+    ) -> L2Order {
+        L2Order {
+            market: Market::XSHE,
+            channel: 1,
+            message_number: order_id,
+            code: "000001.XSHE".to_string(),
+            price,
+            volume,
+            direction,
+            order_type,
+            timestamp_ms: 1_000,
+            order_number: order_id,
         }
     }
 
@@ -658,5 +898,173 @@ mod tests {
             err,
             OrderBookError::UnexpectedOrderStreamCancel(Market::XSHE)
         );
+    }
+
+    #[test]
+    fn shenzhen_best_own_buy_joins_bid_one_tail() {
+        let mut book = OrderBook::new();
+
+        let mut bid_one = shenzhen_order(1, OrderDirection::Buy, 100_000, 10, OrderType::Limit);
+        bid_one.order_number = 1;
+        book.apply_order(bid_one).unwrap();
+
+        let best_own = shenzhen_order(2, OrderDirection::Buy, 0, 7, OrderType::BestOwn);
+        book.apply_order(best_own).unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert_eq!(snapshot.bids[0].price, 100_000);
+        assert_eq!(snapshot.bids[0].total_qty, 17);
+        assert_eq!(
+            book.bids
+                .get(&100_000)
+                .unwrap()
+                .orders
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn shenzhen_best_own_without_same_side_quote_is_ignored() {
+        let mut book = OrderBook::new();
+
+        let best_own = shenzhen_order(2, OrderDirection::Buy, 0, 7, OrderType::BestOwn);
+        book.apply_order(best_own).unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert!(snapshot.bids.is_empty());
+        assert!(snapshot.asks.is_empty());
+    }
+
+    #[test]
+    fn shenzhen_market_order_is_held_until_trade_chain_ends() {
+        let mut book = OrderBook::new();
+
+        let mut bid_one = shenzhen_order(1, OrderDirection::Buy, 100_000, 10, OrderType::Limit);
+        bid_one.order_number = 1;
+        book.apply_order(bid_one).unwrap();
+        book.apply_order(shenzhen_order(
+            2,
+            OrderDirection::Buy,
+            0,
+            7,
+            OrderType::Market,
+        ))
+        .unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert_eq!(snapshot.bids.len(), 1);
+        assert_eq!(snapshot.bids[0].price, 100_000);
+        assert_eq!(snapshot.bids[0].total_qty, 10);
+        assert!(book.has_unsettled_holdings());
+        assert_eq!(book.holding_orders.get(&2).unwrap().remaining_volume, 7);
+
+        let mut trade = transaction(2, 0, 4);
+        trade.market = Market::XSHE;
+        trade.deal_type = "F".to_string();
+        trade.price = 101_000;
+        book.apply_transaction(trade).unwrap();
+
+        assert!(book.has_unsettled_holdings());
+        assert_eq!(book.holding_orders.get(&2).unwrap().remaining_volume, 3);
+        assert_eq!(book.holding_orders.get(&2).unwrap().resting_price, Some(101_000));
+
+        let mut unrelated_trade = transaction(99, 100, 1);
+        unrelated_trade.market = Market::XSHE;
+        unrelated_trade.deal_type = "F".to_string();
+        unrelated_trade.price = 99_500;
+        book.apply_transaction(unrelated_trade).unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert!(!book.has_unsettled_holdings());
+        assert_eq!(snapshot.bids.len(), 2);
+        assert_eq!(snapshot.bids[0].price, 101_000);
+        assert_eq!(snapshot.bids[0].total_qty, 3);
+        assert_eq!(snapshot.bids[1].price, 100_000);
+        assert_eq!(snapshot.bids[1].total_qty, 10);
+    }
+
+    #[test]
+    fn shenzhen_market_order_can_be_cancelled_while_held() {
+        let mut book = OrderBook::new();
+
+        book.apply_order(shenzhen_order(
+            88,
+            OrderDirection::Buy,
+            0,
+            10,
+            OrderType::Market,
+        ))
+        .unwrap();
+
+        book.apply_transaction(sz_cancel_transaction(88)).unwrap();
+        assert!(!book.holding_orders.contains_key(&88));
+        assert!(!book.has_unsettled_holdings());
+    }
+
+    #[test]
+    fn shenzhen_market_order_without_following_trade_is_dropped() {
+        let mut book = OrderBook::new();
+
+        book.apply_order(shenzhen_order(
+            88,
+            OrderDirection::Buy,
+            0,
+            10,
+            OrderType::Market,
+        ))
+        .unwrap();
+
+        let mut unrelated_trade = transaction(99, 100, 1);
+        unrelated_trade.market = Market::XSHE;
+        unrelated_trade.deal_type = "F".to_string();
+        unrelated_trade.price = 99_500;
+        book.apply_transaction(unrelated_trade).unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert!(snapshot.bids.is_empty());
+        assert!(snapshot.asks.is_empty());
+        assert!(!book.has_unsettled_holdings());
+    }
+
+    #[test]
+    fn shenzhen_best_own_sees_residual_from_traded_market_order_before_applying() {
+        let mut book = OrderBook::new();
+
+        let mut old_best = shenzhen_order(1, OrderDirection::Buy, 100_000, 10, OrderType::Limit);
+        old_best.order_number = 1;
+        book.apply_order(old_best).unwrap();
+
+        book.apply_order(shenzhen_order(
+            88,
+            OrderDirection::Buy,
+            0,
+            10,
+            OrderType::Market,
+        ))
+        .unwrap();
+
+        let mut trade = transaction(88, 0, 4);
+        trade.market = Market::XSHE;
+        trade.deal_type = "F".to_string();
+        trade.price = 101_000;
+        book.apply_transaction(trade).unwrap();
+
+        book.apply_order(shenzhen_order(
+            99,
+            OrderDirection::Buy,
+            0,
+            7,
+            OrderType::BestOwn,
+        ))
+        .unwrap();
+
+        let snapshot = book.snapshot(10);
+        assert_eq!(snapshot.bids[0].price, 101_000);
+        assert_eq!(snapshot.bids[0].total_qty, 13);
+        assert_eq!(snapshot.bids[1].price, 100_000);
+        assert_eq!(snapshot.bids[1].total_qty, 10);
     }
 }

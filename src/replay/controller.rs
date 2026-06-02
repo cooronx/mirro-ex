@@ -17,8 +17,6 @@ use super::coordinator::{ReplayCoordinator, ReplayCoordinatorError};
 use super::db_reader::{ReplayDbReader, ReplayDbReaderError};
 use super::event::ReplayEvent;
 
-const DEFAULT_TICK_INTERVAL_MS: u64 = 100;
-
 pub type Result<T> = std::result::Result<T, ReplayControllerError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,7 +293,7 @@ impl ReplayController {
         let mut coordinator = ReplayCoordinator::from_reader(
             reader,
             clock,
-            DEFAULT_TICK_INTERVAL_MS,
+            self.replay_config.tick_interval_ms,
             self.replay_config.lane_queue_capacity,
         )
         .await?;
@@ -459,8 +457,11 @@ mod tests {
     fn splits_cross_day_request_into_daily_windows() {
         let request = ReplayConfig {
             lane_queue_capacity: 1,
+            tick_interval_ms: 5,
             batch_size: 100_000,
             snapshot_depth: 5,
+            write_snapshot_csv: true,
+            snapshot_csv_path: "data/order_book_snapshot.csv".to_string(),
             replay_start_date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
             replay_end_date: NaiveDate::from_ymd_opt(2026, 5, 13).unwrap(),
             replay_start_time: NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap(),

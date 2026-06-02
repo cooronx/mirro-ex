@@ -13,8 +13,14 @@ transaction = "Transaction"
 [replay]
 # 每个channel提前拉取多少个批次
 lane_queue_capacity = 8
+# 主循环每隔多少毫秒推进一次 replay
+tick_interval_ms = 5
 # 输出盘口的档位深度
 snapshot_depth = 5
+# 是否导出 snapshot csv
+write_snapshot_csv = true
+# snapshot csv 输出路径
+snapshot_csv_path = "data/order_book_snapshot.csv"
 # 每次从数据库拉取多少条事件，越小越省内存，但查询次数会更多
 batch_size = 100000
 # 回放日期范围，格式为 YYYY-MM-DD

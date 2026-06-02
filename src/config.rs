@@ -40,10 +40,16 @@ pub struct DbTableConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ReplayConfig {
     pub lane_queue_capacity: usize,
+    #[serde(default = "default_tick_interval_ms")]
+    pub tick_interval_ms: u64,
     #[serde(default = "default_replay_batch_size")]
     pub batch_size: i64,
     #[serde(default = "default_snapshot_depth")]
     pub snapshot_depth: usize,
+    #[serde(default = "default_write_snapshot_csv")]
+    pub write_snapshot_csv: bool,
+    #[serde(default = "default_snapshot_csv_path")]
+    pub snapshot_csv_path: String,
     #[serde(deserialize_with = "deserialize_replay_date")]
     pub replay_start_date: NaiveDate,
     #[serde(deserialize_with = "deserialize_replay_date")]
@@ -98,12 +104,24 @@ fn default_replay_speed() -> f64 {
     1.0
 }
 
+fn default_tick_interval_ms() -> u64 {
+    5
+}
+
 fn default_replay_batch_size() -> i64 {
     100_000
 }
 
 fn default_snapshot_depth() -> usize {
     5
+}
+
+fn default_write_snapshot_csv() -> bool {
+    true
+}
+
+fn default_snapshot_csv_path() -> String {
+    "data/order_book_snapshot.csv".to_string()
 }
 
 fn default_log_level() -> String {

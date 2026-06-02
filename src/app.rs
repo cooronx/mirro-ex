@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -15,8 +16,9 @@ use crate::replay::{ReplayController, ReplayEvent, ReplayHandler};
 struct OrderBookSnapshotHandler {
     tracked_codes: Option<HashSet<String>>,
     books: HashMap<String, OrderBook>,
+    last_event_timestamps: HashMap<String, i64>,
     snapshot_depth: usize,
-    writer: Writer<File>,
+    writer: Option<Writer<File>>,
     dispatcher: NatsDispatcher,
 }
 
@@ -24,12 +26,13 @@ impl OrderBookSnapshotHandler {
     fn new(
         tracked_codes: Option<HashSet<String>>,
         snapshot_depth: usize,
-        writer: Writer<File>,
+        writer: Option<Writer<File>>,
         dispatcher: NatsDispatcher,
     ) -> Self {
         Self {
             tracked_codes,
             books: HashMap::new(),
+            last_event_timestamps: HashMap::new(),
             snapshot_depth,
             writer,
             dispatcher,
@@ -38,6 +41,8 @@ impl OrderBookSnapshotHandler {
 
     fn should_track_order(order: &L2Order) -> bool {
         matches!(order.order_type, OrderType::Limit)
+            || matches!(order.order_type, OrderType::Market)
+            || matches!(order.order_type, OrderType::BestOwn)
             || (matches!(order.order_type, OrderType::Cancel)
                 && matches!(order.market, crate::common::Market::XSHG))
     }
@@ -88,6 +93,10 @@ impl OrderBookSnapshotHandler {
         self.book_for_code(code).snapshot(snapshot_depth)
     }
 
+    fn can_emit_snapshot(&mut self, code: &str) -> bool {
+        !self.book_for_code(code).has_unsettled_holdings()
+    }
+
     async fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) -> anyhow::Result<()> {
         let snapshot = self.current_snapshot(code);
         let mut row = vec![timestamp_ms.to_string(), code.to_string()];
@@ -98,9 +107,11 @@ impl OrderBookSnapshotHandler {
             row.push(Self::level_cell(&snapshot.asks, index));
         }
 
-        self.writer
-            .write_record(&row)
-            .context("failed to write order book snapshot csv row")?;
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .write_record(&row)
+                .context("failed to write order book snapshot csv row")?;
+        }
         self.dispatcher
             .publish_snapshot(timestamp_ms, code, snapshot)
             .await
@@ -109,10 +120,26 @@ impl OrderBookSnapshotHandler {
         Ok(())
     }
 
-    fn flush(&mut self) -> anyhow::Result<()> {
-        self.writer
-            .flush()
-            .context("failed to flush order book snapshot csv writer")
+    async fn flush(&mut self) -> anyhow::Result<()> {
+        let codes = self.books.keys().cloned().collect::<Vec<_>>();
+        for code in codes {
+            let Some(timestamp_ms) = self.last_event_timestamps.get(&code).copied() else {
+                continue;
+            };
+            let changed = self
+                .book_for_code(&code)
+                .finalize_all_holdings()
+                .with_context(|| format!("failed to finalize holdings for code={code}"))?;
+            if changed && self.can_emit_snapshot(&code) {
+                self.record_snapshot(timestamp_ms, &code).await?;
+            }
+        }
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .flush()
+                .context("failed to flush order book snapshot csv writer")?;
+        }
+        Ok(())
     }
 }
 
@@ -124,6 +151,8 @@ impl ReplayHandler for OrderBookSnapshotHandler {
             if !self.should_track_code(&event_code) {
                 continue;
             }
+            self.last_event_timestamps
+                .insert(event_code.clone(), event.timestamp_ms());
 
             match event {
                 ReplayEvent::Order(order) => {
@@ -152,8 +181,10 @@ impl ReplayHandler for OrderBookSnapshotHandler {
                 }
             }
 
-            self.record_snapshot(event.timestamp_ms(), &event_code)
-                .await?;
+            if self.can_emit_snapshot(&event_code) {
+                self.record_snapshot(event.timestamp_ms(), &event_code)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -161,19 +192,30 @@ impl ReplayHandler for OrderBookSnapshotHandler {
 }
 
 pub async fn run(config: AppConfig) -> Result<()> {
-    fs::create_dir_all("data").context("failed to create data directory")?;
-    let output_file =
-        File::create("data/order_book_snapshot.csv").context("failed to create output csv")?;
-    let mut writer = Writer::from_writer(output_file);
-    writer
-        .write_record([
-            "ts", "code", "bid1", "bid2", "bid3", "bid4", "bid5", "ask1", "ask2", "ask3", "ask4",
-            "ask5",
-        ])
-        .context("failed to write csv header")?;
+    let csv_output_path = config.replay.snapshot_csv_path.clone();
+    let write_snapshot_csv = config.replay.write_snapshot_csv;
+    let writer = if write_snapshot_csv {
+        let output_path = Path::new(&csv_output_path);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).context("failed to create csv output directory")?;
+        }
+        let output_file = File::create(output_path)
+            .with_context(|| format!("failed to create output csv at {}", output_path.display()))?;
+        let mut writer = Writer::from_writer(output_file);
+        writer
+            .write_record([
+                "ts", "code", "bid1", "bid2", "bid3", "bid4", "bid5", "ask1", "ask2", "ask3",
+                "ask4", "ask5",
+            ])
+            .context("failed to write csv header")?;
+        Some(writer)
+    } else {
+        None
+    };
 
     info!(
-        output_path = "data/order_book_snapshot.csv",
+        write_snapshot_csv = write_snapshot_csv,
+        snapshot_csv_path = %csv_output_path,
         db_url = %config.db.url,
         db_name = %config.db.database,
         sh_order_table = %config.db.tables.sh_order,
@@ -185,6 +227,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         replay_start_time = %config.replay.replay_start_time.format("%H:%M:%S%.3f"),
         replay_end_time = %config.replay.replay_end_time.format("%H:%M:%S%.3f"),
         replay_speed = config.replay.replay_speed,
+        tick_interval_ms = config.replay.tick_interval_ms,
         batch_size = config.replay.batch_size,
         snapshot_depth = config.replay.snapshot_depth,
         skip_intraday_breaks = config.replay.skip_intraday_breaks,
@@ -206,7 +249,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         OrderBookSnapshotHandler::new(tracked_codes, snapshot_depth, writer, dispatcher);
 
     let report = controller.replay(&mut handler).await?;
-    handler.flush()?;
+    handler.flush().await?;
     info!(
         ticks = report.ticks,
         total_events = report.total_events,

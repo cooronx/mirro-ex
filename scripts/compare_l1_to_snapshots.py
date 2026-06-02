@@ -5,12 +5,14 @@ import bisect
 import csv
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
 SH_TZ = ZoneInfo("Asia/Shanghai")
+MIDDAY_BREAK_START = time(11, 30, 0)
+MIDDAY_BREAK_END = time(13, 0, 0)
 
 
 @dataclass
@@ -42,20 +44,9 @@ def parse_args() -> argparse.Namespace:
         help="Nearby search window in milliseconds on each side.",
     )
     parser.add_argument(
-        "--top-k",
-        type=int,
-        default=10,
-        help="How many nearby candidates to keep for each L1 row.",
-    )
-    parser.add_argument(
-        "--best-output",
-        default="data/l1_vs_snapshot_best_match.csv",
-        help="Output CSV for best matches.",
-    )
-    parser.add_argument(
-        "--nearby-output",
-        default="data/l1_vs_snapshot_nearby.csv",
-        help="Output CSV for nearby candidate matches.",
+        "--unmatched-output",
+        default="data/l1_unmatched.csv",
+        help="Output CSV for L1 rows that have no exact snapshot match within the search window.",
     )
     return parser.parse_args()
 
@@ -63,6 +54,12 @@ def parse_args() -> argparse.Namespace:
 def l1_time_to_ms(raw: str) -> int:
     dt = datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=SH_TZ)
     return int(dt.timestamp() * 1000)
+
+
+def is_midday_break_l1_time(raw: str) -> bool:
+    dt = datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S")
+    current_time = dt.time()
+    return MIDDAY_BREAK_START < current_time < MIDDAY_BREAK_END
 
 
 def normalize_code(raw: str) -> str:
@@ -163,28 +160,21 @@ def score_rows(l1_bids: list[str], l1_asks: list[str], snapshot: BookRow) -> int
     return score
 
 
-def format_match_row(
+def format_unmatched_row(
     l1_row: dict[str, str],
     l1_ts_ms: int,
     l1_bids: list[str],
     l1_asks: list[str],
-    snapshot: BookRow,
-    score: int,
 ) -> dict[str, str]:
     result: dict[str, str] = {
         "l1_time": l1_row["time"],
         "l1_ts_ms": str(l1_ts_ms),
-        "snapshot_ts_ms": str(snapshot.ts_ms),
-        "delta_ms": str(snapshot.ts_ms - l1_ts_ms),
-        "score": str(score),
-        "code": l1_row["code"],
+        "code": normalize_code(l1_row["code"]),
     }
 
     for index in range(5):
         result[f"l1_bid{index + 1}"] = l1_bids[index]
-        result[f"snapshot_bid{index + 1}"] = snapshot.bids[index]
         result[f"l1_ask{index + 1}"] = l1_asks[index]
-        result[f"snapshot_ask{index + 1}"] = snapshot.asks[index]
 
     return result
 
@@ -192,7 +182,26 @@ def format_match_row(
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
-        path.write_text("", encoding="utf-8")
+        with path.open("w", newline="") as fh:
+            writer = csv.DictWriter(
+                fh,
+                fieldnames=[
+                    "l1_time",
+                    "l1_ts_ms",
+                    "code",
+                    "l1_bid1",
+                    "l1_bid2",
+                    "l1_bid3",
+                    "l1_bid4",
+                    "l1_bid5",
+                    "l1_ask1",
+                    "l1_ask2",
+                    "l1_ask3",
+                    "l1_ask4",
+                    "l1_ask5",
+                ],
+            )
+            writer.writeheader()
         return
 
     with path.open("w", newline="") as fh:
@@ -205,19 +214,22 @@ def main() -> None:
     args = parse_args()
     l1_path = Path(args.l1)
     snapshot_path = Path(args.snapshots)
-    best_output_path = Path(args.best_output)
-    nearby_output_path = Path(args.nearby_output)
+    unmatched_output_path = Path(args.unmatched_output)
 
     snapshots = load_snapshots(snapshot_path)
     snapshot_index = index_snapshots_by_code(snapshots)
-    best_rows: list[dict[str, str]] = []
-    nearby_rows: list[dict[str, str]] = []
+    unmatched_rows_output: list[dict[str, str]] = []
     exact_match_rows = 0
     total_rows = 0
+    skipped_midday_rows = 0
 
     with l1_path.open("r", newline="") as fh:
         reader = csv.DictReader(fh)
         for l1_row in reader:
+            if is_midday_break_l1_time(l1_row["time"]):
+                skipped_midday_rows += 1
+                continue
+
             total_rows += 1
             l1_ts_ms = l1_time_to_ms(l1_row["time"])
             l1_bids = l1_fields(l1_row, "BuyPrice", "BuyVol")
@@ -226,15 +238,13 @@ def main() -> None:
 
             indexed = snapshot_index.get(code)
             if indexed is None:
-                best_rows.append(
-                    {
-                        "l1_time": l1_row["time"],
-                        "l1_ts_ms": str(l1_ts_ms),
-                        "snapshot_ts_ms": "",
-                        "delta_ms": "",
-                        "score": "",
-                        "code": code,
-                    }
+                unmatched_rows_output.append(
+                    format_unmatched_row(
+                        l1_row,
+                        l1_ts_ms,
+                        l1_bids,
+                        l1_asks,
+                    )
                 )
                 continue
 
@@ -251,41 +261,37 @@ def main() -> None:
             candidates.sort(key=lambda item: (item[0], item[1], item[2].ts_ms))
 
             if not candidates:
-                best_rows.append(
-                    {
-                        "l1_time": l1_row["time"],
-                        "l1_ts_ms": str(l1_ts_ms),
-                        "snapshot_ts_ms": "",
-                        "delta_ms": "",
-                        "score": "",
-                        "code": code,
-                    }
+                unmatched_rows_output.append(
+                    format_unmatched_row(
+                        l1_row,
+                        l1_ts_ms,
+                        l1_bids,
+                        l1_asks,
+                    )
                 )
                 continue
 
             best_score, _, best_snapshot = candidates[0]
             if best_score == 0:
                 exact_match_rows += 1
-            best_rows.append(
-                format_match_row(
-                    l1_row, l1_ts_ms, l1_bids, l1_asks, best_snapshot, best_score
+            else:
+                unmatched_rows_output.append(
+                    format_unmatched_row(
+                        l1_row,
+                        l1_ts_ms,
+                        l1_bids,
+                        l1_asks,
+                    )
                 )
-            )
 
-            for rank, (score, _, snapshot) in enumerate(candidates[: args.top_k], start=1):
-                row = format_match_row(l1_row, l1_ts_ms, l1_bids, l1_asks, snapshot, score)
-                row["rank"] = str(rank)
-                nearby_rows.append(row)
-
-    write_csv(best_output_path, best_rows)
-    write_csv(nearby_output_path, nearby_rows)
+    write_csv(unmatched_output_path, unmatched_rows_output)
 
     unmatched_rows = total_rows - exact_match_rows
     print(f"total_l1_rows={total_rows}")
     print(f"exact_match_rows={exact_match_rows}")
     print(f"unmatched_l1_rows={unmatched_rows}")
-    print(f"best_output={best_output_path}")
-    print(f"nearby_output={nearby_output_path}")
+    print(f"skipped_midday_l1_rows={skipped_midday_rows}")
+    print(f"unmatched_output={unmatched_output_path}")
 
 
 if __name__ == "__main__":
