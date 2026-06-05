@@ -30,6 +30,8 @@ pub struct DbConfig {
     pub database: String,
     pub pool_size: usize,
     pub tables: DbTableConfig,
+    #[serde(default)]
+    pub schema: DbSchemaConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -37,6 +39,14 @@ pub struct DbTableConfig {
     pub sh_order: String,
     pub sz_order: String,
     pub transaction: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct DbSchemaConfig {
+    pub market_schema_path: String,
+    pub trading_db_path: String,
+    pub trading_schema_path: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -141,6 +151,18 @@ fn default_web_host() -> String {
     "127.0.0.1".to_string()
 }
 
+fn default_market_schema_path() -> String {
+    "scripts/create_local_clickhouse_tables.sql".to_string()
+}
+
+fn default_trading_db_path() -> String {
+    "data/trading.db".to_string()
+}
+
+fn default_trading_schema_path() -> String {
+    "scripts/create_trading_sqlite_schema.sql".to_string()
+}
+
 fn default_web_port() -> u16 {
     5800
 }
@@ -174,6 +196,16 @@ impl Default for WebConfig {
         Self {
             host: default_web_host(),
             port: default_web_port(),
+        }
+    }
+}
+
+impl Default for DbSchemaConfig {
+    fn default() -> Self {
+        Self {
+            market_schema_path: default_market_schema_path(),
+            trading_db_path: default_trading_db_path(),
+            trading_schema_path: default_trading_schema_path(),
         }
     }
 }

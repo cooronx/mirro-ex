@@ -12,6 +12,7 @@ clickhouse = "0.15.0"
 csv = "1.4.0"
 prost = "0.14.1"
 salvo = "0.84.2"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.17"
 tokio = { version = "1.52.3",features = ["full"]}

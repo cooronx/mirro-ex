@@ -10,6 +10,11 @@ sh_order = "SHOrder"
 sz_order = "SZOrder"
 transaction = "Transaction"
 
+[db.schema]
+market_schema_path = "scripts/create_local_clickhouse_tables.sql"
+trading_db_path = "data/trading.db"
+trading_schema_path = "scripts/create_trading_sqlite_schema.sql"
+
 [replay]
 # 每个channel提前拉取多少个批次
 lane_queue_capacity = 8

@@ -7,14 +7,21 @@ use tracing::info;
 
 use crate::config::AppConfig;
 use crate::replay_manager::ReplayManager;
+use crate::trading::{TradingStore, trading_db_path_from_config};
 
-mod routes;
+mod common;
+mod replay;
+mod trading;
 
 pub async fn serve(config: AppConfig) -> Result<()> {
     let host = config.web.host.clone();
     let port = config.web.port;
+    let trading_db_path = trading_db_path_from_config(&config.db.schema.trading_db_path)?;
+    let trading_store = Arc::new(TradingStore::new(trading_db_path));
     let manager = Arc::new(ReplayManager::new(config));
-    let router = routes::router(manager);
+    let router = Router::new()
+        .push(replay::router(manager))
+        .push(trading::router(trading_store));
 
     info!(host = %host, port = port, "starting salvo web server");
 

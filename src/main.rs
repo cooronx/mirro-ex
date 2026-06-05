@@ -9,6 +9,7 @@ mod publisher;
 mod replay;
 mod replay_manager;
 mod sim_clock;
+mod trading;
 mod web;
 
 use anyhow::Result;
@@ -20,6 +21,7 @@ use crate::config::AppConfig;
 async fn main() -> Result<()> {
     let config = AppConfig::load()?;
     let _logging_guard = logging::init(&config.logging)?;
+    db::init::initialize(&config.db).await?;
 
     if let Err(err) = web::serve(config).await {
         let mut chain = err.to_string();

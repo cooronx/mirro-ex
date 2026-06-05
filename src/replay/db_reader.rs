@@ -566,7 +566,7 @@ impl ReplayDbReader {
 mod tests {
     use super::{FetchedBatch, ReplayDbReader};
     use crate::common::Market;
-    use crate::config::{DbConfig, DbTableConfig};
+    use crate::config::{DbConfig, DbSchemaConfig, DbTableConfig};
     use crate::db::dbpool::build_client;
     use crate::replay::reader_cursor::{ChannelRange, ReaderCursor, ReplayDataKind};
 
@@ -582,6 +582,7 @@ mod tests {
                 sz_order: "sz_table".to_string(),
                 transaction: "tx_table".to_string(),
             },
+            schema: DbSchemaConfig::default(),
         };
 
         crate::db::dbpool::DbPool::with_client(1, build_client(&config)).unwrap()
