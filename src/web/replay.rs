@@ -1,21 +1,29 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use salvo::http::StatusCode;
 use salvo::prelude::*;
 
 use crate::replay_manager::{ReplayManager, ReplayManagerError, ReplayStartRequest};
 
-use super::common::ApiResponse;
+use super::common::{ApiResponse, render_api_error};
 
+/// 已有进行中的回放
 const REPLAY_ACTIVE_EXISTS_CODE: i32 = 1001;
+/// 暂停回放时发生错误
 const REPLAY_INVALID_PAUSE_STATE_CODE: i32 = 1002;
+/// 恢复回放时发生错误
 const REPLAY_INVALID_RESUME_STATE_CODE: i32 = 1003;
+/// 暂停回放时发生错误
 const REPLAY_INVALID_STOP_STATE_CODE: i32 = 1004;
+/// 无效的开始日期
 const REPLAY_INVALID_START_DATE_CODE: i32 = 1101;
+/// 无效的结束日期
 const REPLAY_INVALID_END_DATE_CODE: i32 = 1102;
+/// 无效的开始时间
 const REPLAY_INVALID_START_TIME_CODE: i32 = 1103;
+/// 无效的结束时间
 const REPLAY_INVALID_END_TIME_CODE: i32 = 1104;
+/// 回放模块的内部错误
 const REPLAY_INTERNAL_COMMAND_CODE: i32 = 1500;
 
 pub fn router(manager: Arc<ReplayManager>) -> Router {
@@ -77,10 +85,7 @@ impl Handler for StartReplayHandler {
         };
 
         match self.manager.start(request).await {
-            Ok(status) => {
-                res.status_code(StatusCode::ACCEPTED);
-                res.render(Json(ApiResponse::success(status)));
-            }
+            Ok(status) => res.render(Json(ApiResponse::success(status))),
             Err(err) => render_manager_error(res, err),
         }
     }
@@ -163,35 +168,19 @@ impl Handler for GetReplayConfigHandler {
 }
 
 fn render_manager_error(res: &mut Response, err: ReplayManagerError) {
-    let (status, code) = match err {
-        ReplayManagerError::ActiveReplayExists => (StatusCode::CONFLICT, REPLAY_ACTIVE_EXISTS_CODE),
-        ReplayManagerError::InvalidPauseState(_) => {
-            (StatusCode::CONFLICT, REPLAY_INVALID_PAUSE_STATE_CODE)
+    let code = match err {
+        ReplayManagerError::ActiveReplayExists => REPLAY_ACTIVE_EXISTS_CODE,
+        ReplayManagerError::InvalidPauseState(_) => REPLAY_INVALID_PAUSE_STATE_CODE,
+        ReplayManagerError::InvalidResumeState(_) => REPLAY_INVALID_RESUME_STATE_CODE,
+        ReplayManagerError::InvalidStopState(_) => REPLAY_INVALID_STOP_STATE_CODE,
+        ReplayManagerError::MissingCommandChannel | ReplayManagerError::SendCommand => {
+            REPLAY_INTERNAL_COMMAND_CODE
         }
-        ReplayManagerError::InvalidResumeState(_) => {
-            (StatusCode::CONFLICT, REPLAY_INVALID_RESUME_STATE_CODE)
-        }
-        ReplayManagerError::InvalidStopState(_) => {
-            (StatusCode::CONFLICT, REPLAY_INVALID_STOP_STATE_CODE)
-        }
-        ReplayManagerError::MissingCommandChannel | ReplayManagerError::SendCommand => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            REPLAY_INTERNAL_COMMAND_CODE,
-        ),
-        ReplayManagerError::InvalidReplayStartDate(_) => {
-            (StatusCode::BAD_REQUEST, REPLAY_INVALID_START_DATE_CODE)
-        }
-        ReplayManagerError::InvalidReplayEndDate(_) => {
-            (StatusCode::BAD_REQUEST, REPLAY_INVALID_END_DATE_CODE)
-        }
-        ReplayManagerError::InvalidReplayStartTime(_) => {
-            (StatusCode::BAD_REQUEST, REPLAY_INVALID_START_TIME_CODE)
-        }
-        ReplayManagerError::InvalidReplayEndTime(_) => {
-            (StatusCode::BAD_REQUEST, REPLAY_INVALID_END_TIME_CODE)
-        }
+        ReplayManagerError::InvalidReplayStartDate(_) => REPLAY_INVALID_START_DATE_CODE,
+        ReplayManagerError::InvalidReplayEndDate(_) => REPLAY_INVALID_END_DATE_CODE,
+        ReplayManagerError::InvalidReplayStartTime(_) => REPLAY_INVALID_START_TIME_CODE,
+        ReplayManagerError::InvalidReplayEndTime(_) => REPLAY_INVALID_END_TIME_CODE,
     };
 
-    res.status_code(status);
-    res.render(Json(ApiResponse::error(code, err.to_string())));
+    render_api_error(res, code, err.to_string());
 }

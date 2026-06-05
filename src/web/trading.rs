@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use salvo::http::StatusCode;
 use salvo::prelude::*;
 use serde::Deserialize;
 use tokio::task;
 
 use crate::trading::{CreateAccountRequest, TradingStore, TradingStoreError};
 
-use super::common::ApiResponse;
+use super::common::{ApiResponse, parse_query, parse_query_json, render_api_error};
 
+/// 无效的创建账户请求
 const TRADING_INVALID_ACCOUNT_REQUEST_CODE: i32 = 2001;
 const TRADING_INVALID_ACCOUNT_QUERY_CODE: i32 = 2002;
 const TRADING_EMPTY_USER_ID_CODE: i32 = 2101;
@@ -49,31 +49,27 @@ impl Handler for CreateAccountHandler {
         res: &mut Response,
         _ctrl: &mut FlowCtrl,
     ) {
-        let request = match req.parse_json::<CreateAccountRequest>().await {
-            Ok(request) => request,
-            Err(err) => {
-                res.status_code(StatusCode::BAD_REQUEST);
-                res.render(Json(ApiResponse::error(
-                    TRADING_INVALID_ACCOUNT_REQUEST_CODE,
-                    format!("invalid account create request: {err}"),
-                )));
-                return;
-            }
+        let Some(request) = parse_query_json::<CreateAccountRequest>(
+            req,
+            res,
+            TRADING_INVALID_ACCOUNT_REQUEST_CODE,
+            "invalid account create request",
+        )
+        .await
+        else {
+            return;
         };
 
         let trading_store = self.trading_store.clone();
         match task::spawn_blocking(move || trading_store.create_account(request)).await {
-            Ok(Ok(account)) => {
-                res.status_code(StatusCode::CREATED);
-                res.render(Json(ApiResponse::success(account)));
-            }
+            Ok(Ok(account)) => res.render(Json(ApiResponse::success(account))),
             Ok(Err(err)) => render_trading_error(res, err),
             Err(err) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::error(
+                render_api_error(
+                    res,
                     TRADING_INTERNAL_TASK_CODE,
                     format!("account create task join failed: {err}"),
-                )));
+                );
             }
         }
     }
@@ -88,16 +84,13 @@ impl Handler for GetAccountHandler {
         res: &mut Response,
         _ctrl: &mut FlowCtrl,
     ) {
-        let query = match req.parse_queries::<GetAccountQuery>() {
-            Ok(query) => query,
-            Err(err) => {
-                res.status_code(StatusCode::BAD_REQUEST);
-                res.render(Json(ApiResponse::error(
-                    TRADING_INVALID_ACCOUNT_QUERY_CODE,
-                    format!("invalid account query: {err}"),
-                )));
-                return;
-            }
+        let Some(query) = parse_query::<GetAccountQuery>(
+            req,
+            res,
+            TRADING_INVALID_ACCOUNT_QUERY_CODE,
+            "invalid account query",
+        ) else {
+            return;
         };
 
         let trading_store = self.trading_store.clone();
@@ -105,36 +98,26 @@ impl Handler for GetAccountHandler {
             Ok(Ok(account)) => res.render(Json(ApiResponse::success(account))),
             Ok(Err(err)) => render_trading_error(res, err),
             Err(err) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::error(
+                render_api_error(
+                    res,
                     TRADING_INTERNAL_TASK_CODE,
                     format!("account query task join failed: {err}"),
-                )));
+                );
             }
         }
     }
 }
 
 fn render_trading_error(res: &mut Response, err: TradingStoreError) {
-    let (status, code) = match err {
-        TradingStoreError::EmptyUserId => (StatusCode::BAD_REQUEST, TRADING_EMPTY_USER_ID_CODE),
-        TradingStoreError::InvalidInitialCash => {
-            (StatusCode::BAD_REQUEST, TRADING_INVALID_INITIAL_CASH_CODE)
-        }
-        TradingStoreError::AccountAlreadyExists { .. } => {
-            (StatusCode::CONFLICT, TRADING_ACCOUNT_ALREADY_EXISTS_CODE)
-        }
-        TradingStoreError::AccountNotFound { .. } => {
-            (StatusCode::NOT_FOUND, TRADING_ACCOUNT_NOT_FOUND_CODE)
-        }
+    let code = match err {
+        TradingStoreError::EmptyUserId => TRADING_EMPTY_USER_ID_CODE,
+        TradingStoreError::InvalidInitialCash => TRADING_INVALID_INITIAL_CASH_CODE,
+        TradingStoreError::AccountAlreadyExists { .. } => TRADING_ACCOUNT_ALREADY_EXISTS_CODE,
+        TradingStoreError::AccountNotFound { .. } => TRADING_ACCOUNT_NOT_FOUND_CODE,
         TradingStoreError::OpenConnection { .. }
         | TradingStoreError::CreateAccount { .. }
-        | TradingStoreError::QueryAccount { .. } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            TRADING_INTERNAL_STORE_CODE,
-        ),
+        | TradingStoreError::QueryAccount { .. } => TRADING_INTERNAL_STORE_CODE,
     };
 
-    res.status_code(status);
-    res.render(Json(ApiResponse::error(code, err.to_string())));
+    render_api_error(res, code, err.to_string());
 }
