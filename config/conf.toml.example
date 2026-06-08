@@ -18,13 +18,15 @@ trading_schema_path = "scripts/create_trading_sqlite_schema.sql"
 [replay]
 # 每个channel提前拉取多少个批次
 lane_queue_capacity = 8
+# 并行维护盘口和导出快照的worker数量
+orderbook_workers = 6
 # 主循环每隔多少毫秒推进一次 replay
 tick_interval_ms = 5
 # 输出盘口的档位深度
 snapshot_depth = 10
 # 是否导出 snapshot parquet
 write_snapshot_parquet = true
-# snapshot parquet 输出目录，每个交易日一个文件
+# snapshot parquet 输出目录，每个交易日、每个标的一个文件
 snapshot_parquet_dir = "data/order_book_snapshot"
 # 每次从数据库拉取多少条事件，越小越省内存，但查询次数会更多
 batch_size = 100000

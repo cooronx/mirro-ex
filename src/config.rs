@@ -47,6 +47,8 @@ pub struct DbSchemaConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ReplayConfig {
     pub lane_queue_capacity: usize,
+    #[serde(default = "default_orderbook_workers")]
+    pub orderbook_workers: usize,
     #[serde(default = "default_tick_interval_ms")]
     pub tick_interval_ms: u64,
     #[serde(default = "default_replay_batch_size")]
@@ -103,6 +105,10 @@ impl AppConfig {
 
 fn default_tick_interval_ms() -> u64 {
     5
+}
+
+fn default_orderbook_workers() -> usize {
+    6
 }
 
 fn default_replay_batch_size() -> i64 {

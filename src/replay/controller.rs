@@ -250,7 +250,7 @@ pub trait ReplayHandler: Send {
         Ok(())
     }
 
-    async fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()>;
+    async fn on_events(&mut self, events: Vec<ReplayEvent>) -> anyhow::Result<()>;
 
     async fn on_day_end(&mut self, _day: &str) -> anyhow::Result<()> {
         Ok(())
@@ -262,7 +262,7 @@ pub struct PrintReplayHandler;
 
 #[async_trait]
 impl ReplayHandler for PrintReplayHandler {
-    async fn on_events(&mut self, _events: &[ReplayEvent]) -> anyhow::Result<()> {
+    async fn on_events(&mut self, _events: Vec<ReplayEvent>) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -589,7 +589,7 @@ impl ReplayController {
 
             if !result.events.is_empty() {
                 handler
-                    .on_events(&result.events)
+                    .on_events(result.events)
                     .await
                     .map_err(ReplayControllerError::Handler)?;
             }

@@ -57,6 +57,7 @@ pub type Result<T> = std::result::Result<T, ReplayManagerError>;
 #[derive(Debug, Clone, Serialize)]
 pub struct ReplayEngineConfigView {
     pub lane_queue_capacity: usize,
+    pub orderbook_workers: usize,
     pub tick_interval_ms: u64,
     pub batch_size: i64,
     pub snapshot_depth: usize,
@@ -68,6 +69,7 @@ impl From<&ReplayConfig> for ReplayEngineConfigView {
     fn from(config: &ReplayConfig) -> Self {
         Self {
             lane_queue_capacity: config.lane_queue_capacity,
+            orderbook_workers: config.orderbook_workers,
             tick_interval_ms: config.tick_interval_ms,
             batch_size: config.batch_size,
             snapshot_depth: config.snapshot_depth,

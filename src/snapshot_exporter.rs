@@ -47,18 +47,18 @@ impl SnapshotParquetExporter {
         }
     }
 
-    pub fn start_day(&mut self, day: &str) -> Result<()> {
-        self.close_day()?;
-        fs::create_dir_all(&self.output_dir).with_context(|| {
+    pub fn start_code_day(&mut self, day: &str, code: &str) -> Result<()> {
+        self.close()?;
+        let day_dir = self.output_dir.join(day);
+        fs::create_dir_all(&day_dir).with_context(|| {
             format!(
                 "failed to create snapshot parquet directory at {}",
-                self.output_dir.display()
+                day_dir.display()
             )
         })?;
 
-        let output_path = self
-            .output_dir
-            .join(format!("order_book_snapshot_{day}.parquet"));
+        let file_name = format!("{}.parquet", code.replace(['/', '\\'], "_"));
+        let output_path = day_dir.join(file_name);
         let file = File::create(&output_path).with_context(|| {
             format!(
                 "failed to create snapshot parquet file at {}",
@@ -99,7 +99,7 @@ impl SnapshotParquetExporter {
         Ok(())
     }
 
-    pub fn close_day(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> Result<()> {
         self.flush_batch()?;
         if let Some(writer) = self.writer.take() {
             writer

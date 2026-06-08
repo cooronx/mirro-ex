@@ -5,6 +5,7 @@ mod db;
 mod logging;
 mod marketdata;
 mod matcher;
+mod orderbook_worker;
 mod publisher;
 mod replay;
 mod replay_manager;
