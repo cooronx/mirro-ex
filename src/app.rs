@@ -15,6 +15,7 @@ use crate::replay::{
     ReplayControl, ReplayController, ReplayEvent, ReplayHandler, ReplayRunReport,
     ReplayStatusReporter,
 };
+use crate::replay_manager::ReplayTaskConfig;
 use tokio::sync::mpsc;
 
 struct OrderBookSnapshotHandler {
@@ -195,17 +196,15 @@ impl ReplayHandler for OrderBookSnapshotHandler {
     }
 }
 
-pub async fn run(config: AppConfig) -> Result<()> {
-    run_internal(config, None).await.map(|_| ())
-}
-
 pub async fn run_with_control(
     config: AppConfig,
+    task_config: ReplayTaskConfig,
     command_rx: mpsc::UnboundedReceiver<crate::replay::ReplayCommand>,
     status_reporter: ReplayStatusReporter,
 ) -> Result<ReplayRunReport> {
     run_internal(
         config,
+        task_config,
         Some(ReplayControl {
             command_rx,
             status_reporter,
@@ -216,6 +215,7 @@ pub async fn run_with_control(
 
 async fn run_internal(
     config: AppConfig,
+    task_config: ReplayTaskConfig,
     control: Option<ReplayControl>,
 ) -> Result<ReplayRunReport> {
     let csv_output_path = config.replay.snapshot_csv_path.clone();
@@ -251,29 +251,35 @@ async fn run_internal(
         sz_order_table = %config.db.tables.sz_order,
         transaction_table = %config.db.tables.transaction,
         nats_subject = %config.nats.subject,
-        replay_start_date = %config.replay.replay_start_date,
-        replay_end_date = %config.replay.replay_end_date,
-        replay_start_time = %config.replay.replay_start_time.format("%H:%M:%S%.3f"),
-        replay_end_time = %config.replay.replay_end_time.format("%H:%M:%S%.3f"),
-        replay_speed = config.replay.replay_speed,
+        replay_start_date = %task_config.replay_start_date,
+        replay_end_date = %task_config.replay_end_date,
+        replay_start_time = %task_config.replay_start_time.format("%H:%M:%S%.3f"),
+        replay_end_time = %task_config.replay_end_time.format("%H:%M:%S%.3f"),
+        replay_speed = task_config.replay_speed,
         tick_interval_ms = config.replay.tick_interval_ms,
         batch_size = config.replay.batch_size,
         snapshot_depth = config.replay.snapshot_depth,
-        skip_intraday_breaks = config.replay.skip_intraday_breaks,
-        replay_codes = ?config.replay.replay_codes,
+        skip_intraday_breaks = task_config.skip_intraday_breaks,
+        replay_codes = ?task_config.replay_codes,
         "starting replay"
     );
 
     let dispatcher = NatsDispatcher::new(&config.nats)
         .await
         .context("failed to initialize nats dispatcher")?;
-    let tracked_codes = config
-        .replay
-        .replay_codes
-        .clone()
-        .map(|codes| codes.into_iter().collect::<HashSet<_>>());
+    let tracked_codes = if task_config.replay_codes.is_empty() {
+        None
+    } else {
+        Some(
+            task_config
+                .replay_codes
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>(),
+        )
+    };
     let snapshot_depth = config.replay.snapshot_depth;
-    let controller = ReplayController::new(config.db, config.replay);
+    let controller = ReplayController::new(config.db, config.replay, task_config);
     let mut handler =
         OrderBookSnapshotHandler::new(tracked_codes, snapshot_depth, writer, dispatcher);
 

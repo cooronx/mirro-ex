@@ -2,10 +2,11 @@ use std::fs;
 
 use anyhow::{Result, anyhow};
 use chrono::{FixedOffset, Utc};
+use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::LoggingConfig;
@@ -21,42 +22,16 @@ pub fn init(config: &LoggingConfig) -> Result<LoggingGuard> {
     validate_config(config)?;
     let level_filter = parse_level_filter(&config.level)?;
 
-    let file_guard = if config.to_file {
+    let (file_writer, file_guard) = if config.to_file {
         fs::create_dir_all(&config.directory)?;
         let appender = tracing_appender::rolling::daily(&config.directory, &config.file_prefix);
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-
-        match config.to_stdout {
-            true => tracing_subscriber::fmt()
-                .with_max_level(level_filter)
-                .with_ansi(false)
-                .with_target(false)
-                .with_timer(ShanghaiTimer)
-                .with_writer(std::io::stdout.and(non_blocking))
-                .finish()
-                .init(),
-            false => tracing_subscriber::fmt()
-                .with_max_level(level_filter)
-                .with_ansi(false)
-                .with_target(false)
-                .with_timer(ShanghaiTimer)
-                .with_writer(non_blocking)
-                .finish()
-                .init(),
-        }
-
-        Some(guard)
+        (Some(non_blocking), Some(guard))
     } else {
-        tracing_subscriber::fmt()
-            .with_max_level(level_filter)
-            .with_ansi(false)
-            .with_target(false)
-            .with_timer(ShanghaiTimer)
-            .with_writer(std::io::stdout)
-            .finish()
-            .init();
-        None
+        (None, None)
     };
+
+    init_subscriber(config.to_stdout, file_writer, level_filter);
 
     Ok(LoggingGuard {
         _file_guard: file_guard,
@@ -71,6 +46,59 @@ fn validate_config(config: &LoggingConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_subscriber(
+    to_stdout: bool,
+    file_writer: Option<tracing_appender::non_blocking::NonBlocking>,
+    level_filter: LevelFilter,
+) {
+    match (to_stdout, file_writer) {
+        (true, Some(file_writer)) => tracing_subscriber::registry()
+            .with(stdout_layer(level_filter))
+            .with(file_layer(file_writer, level_filter))
+            .init(),
+        (true, None) => tracing_subscriber::registry()
+            .with(stdout_layer(level_filter))
+            .init(),
+        (false, Some(file_writer)) => tracing_subscriber::registry()
+            .with(file_layer(file_writer, level_filter))
+            .init(),
+        (false, None) => unreachable!("logging output must be configured"),
+    }
+}
+
+fn stdout_layer<S>(level_filter: LevelFilter) -> impl Layer<S>
+where
+    S: tracing::Subscriber,
+    for<'a> S: tracing_subscriber::registry::LookupSpan<'a>,
+{
+    tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_file(false)
+        .with_line_number(false)
+        .with_ansi(false)
+        .with_target(false)
+        .with_timer(ShanghaiTimer)
+        .with_writer(std::io::stdout)
+        .with_filter(level_filter)
+}
+
+fn file_layer<S>(
+    writer: tracing_appender::non_blocking::NonBlocking,
+    level_filter: LevelFilter,
+) -> impl Layer<S>
+where
+    S: tracing::Subscriber,
+    for<'a> S: tracing_subscriber::registry::LookupSpan<'a>,
+{
+    tracing_subscriber::fmt::layer()
+        .compact()
+        .with_ansi(false)
+        .with_target(false)
+        .with_timer(ShanghaiTimer)
+        .with_writer(writer)
+        .with_filter(level_filter)
 }
 
 impl FormatTime for ShanghaiTimer {

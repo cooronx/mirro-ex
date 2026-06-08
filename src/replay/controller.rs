@@ -2,7 +2,8 @@
 //! replay总入口模块。
 //! 1. 输入：
 //!    - 数据库配置 `DbConfig`
-//!    - 回放配置 `ReplayConfig`
+//!    - 回放引擎配置 `ReplayConfig`
+//!    - 单次回放任务配置 `ReplayTaskConfig`
 //!    - 上层提供的 `ReplayHandler`
 //!
 //! 2. 输出：
@@ -31,6 +32,7 @@ use crate::db::dbpool::{DbPool, DbPoolError};
 use crate::db::queries::sh_order_query::SHOrderRangeQuery;
 use crate::db::queries::sz_order_query::SZOrderRangeQuery;
 use crate::db::queries::transaction_query::TransactionRangeQuery;
+use crate::replay_manager::ReplayTaskConfig;
 use crate::sim_clock::SimClock;
 
 use super::coordinator::{ReplayCoordinator, ReplayCoordinatorError};
@@ -283,7 +285,8 @@ pub enum ReplayControllerError {
 
 pub struct ReplayController {
     db_config: DbConfig,
-    replay_config: ReplayConfig,
+    replay_engine_config: ReplayConfig,
+    replay_task_config: ReplayTaskConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,10 +309,15 @@ enum SingleDayReplayOutcome {
 }
 
 impl ReplayController {
-    pub fn new(db_config: DbConfig, replay_config: ReplayConfig) -> Self {
+    pub fn new(
+        db_config: DbConfig,
+        replay_engine_config: ReplayConfig,
+        replay_task_config: ReplayTaskConfig,
+    ) -> Self {
         Self {
             db_config,
-            replay_config,
+            replay_engine_config,
+            replay_task_config,
         }
     }
 
@@ -329,10 +337,10 @@ impl ReplayController {
         H: ReplayHandler,
     {
         let total_start = Instant::now();
-        validate_replay_config(&self.replay_config)?;
+        validate_replay_task_config(&self.replay_task_config)?;
 
         let db_pool = DbPool::new(&self.db_config)?;
-        let daily_windows = split_request_into_daily_windows(&self.replay_config);
+        let daily_windows = split_request_into_daily_windows(&self.replay_task_config);
 
         let mut daily_reports = Vec::new();
         let mut skipped_days = Vec::new();
@@ -353,7 +361,7 @@ impl ReplayController {
                 .replay_single_day(
                     &db_pool,
                     &daily_window,
-                    self.replay_config.replay_speed,
+                    self.replay_task_config.replay_speed,
                     handler,
                     control.as_mut(),
                 )
@@ -394,26 +402,26 @@ impl ReplayController {
 
         let report = ReplayRunReport {
             start_date: self
-                .replay_config
+                .replay_task_config
                 .replay_start_date
                 .format("%Y-%m-%d")
                 .to_string(),
             end_date: self
-                .replay_config
+                .replay_task_config
                 .replay_end_date
                 .format("%Y-%m-%d")
                 .to_string(),
             start_time: self
-                .replay_config
+                .replay_task_config
                 .replay_start_time
                 .format("%H:%M:%S%.3f")
                 .to_string(),
             end_time: self
-                .replay_config
+                .replay_task_config
                 .replay_end_time
                 .format("%H:%M:%S%.3f")
                 .to_string(),
-            replay_speed: self.replay_config.replay_speed,
+            replay_speed: self.replay_task_config.replay_speed,
             daily_reports,
             skipped_days,
             ticks: total_ticks,
@@ -455,26 +463,26 @@ impl ReplayController {
             daily_window.end_time_ms,
             &self.db_config.tables.sh_order,
         )
-        .with_codes(self.replay_config.replay_codes.clone().unwrap_or_default());
+        .with_codes(self.replay_task_config.replay_codes.clone());
         let sz_query = SZOrderRangeQuery::new(
             &daily_window.day,
             daily_window.start_time_ms,
             daily_window.end_time_ms,
             &self.db_config.tables.sz_order,
         )
-        .with_codes(self.replay_config.replay_codes.clone().unwrap_or_default());
+        .with_codes(self.replay_task_config.replay_codes.clone());
         let transaction_query = TransactionRangeQuery::new(
             &daily_window.day,
             daily_window.start_time_ms,
             daily_window.end_time_ms,
             &self.db_config.tables.transaction,
         )
-        .with_codes(self.replay_config.replay_codes.clone().unwrap_or_default());
+        .with_codes(self.replay_task_config.replay_codes.clone());
 
         let reader_build_start = Instant::now();
         let reader = ReplayDbReader::from_range_queries(
             db_pool.clone(),
-            self.replay_config.batch_size,
+            self.replay_engine_config.batch_size,
             Some(&sh_query),
             Some(&sz_query),
             Some(&transaction_query),
@@ -493,13 +501,13 @@ impl ReplayController {
             daily_window.start_time_ms as u64,
             daily_window.end_time_ms as u64,
             replay_speed,
-            self.replay_config.skip_intraday_breaks,
+            self.replay_task_config.skip_intraday_breaks,
         )?;
         let mut coordinator = ReplayCoordinator::from_reader(
             reader,
             clock,
-            self.replay_config.tick_interval_ms,
-            self.replay_config.lane_queue_capacity,
+            self.replay_engine_config.tick_interval_ms,
+            self.replay_engine_config.lane_queue_capacity,
         )
         .await?;
 
@@ -724,7 +732,7 @@ fn asia_shanghai_offset() -> FixedOffset {
     FixedOffset::east_opt(8 * 60 * 60).expect("Asia/Shanghai offset should be valid")
 }
 
-fn validate_replay_config(config: &ReplayConfig) -> Result<()> {
+fn validate_replay_task_config(config: &ReplayTaskConfig) -> Result<()> {
     if config.replay_start_date > config.replay_end_date {
         return Err(ReplayControllerError::InvalidDateRange {
             start_date: config.replay_start_date.format("%Y-%m-%d").to_string(),
@@ -742,7 +750,7 @@ fn validate_replay_config(config: &ReplayConfig) -> Result<()> {
     Ok(())
 }
 
-fn split_request_into_daily_windows(request: &ReplayConfig) -> Vec<DailyReplayWindow> {
+fn split_request_into_daily_windows(request: &ReplayTaskConfig) -> Vec<DailyReplayWindow> {
     let mut day = request.replay_start_date;
     let mut windows = Vec::new();
 
@@ -778,7 +786,7 @@ mod tests {
     use super::{
         DailyReplayWindow, split_request_into_daily_windows, timestamp_ms_for_local_datetime,
     };
-    use crate::config::ReplayConfig;
+    use crate::replay_manager::ReplayTaskConfig;
     use chrono::{NaiveDate, NaiveTime};
 
     #[test]
@@ -794,18 +802,12 @@ mod tests {
 
     #[test]
     fn splits_cross_day_request_into_daily_windows() {
-        let request = ReplayConfig {
-            lane_queue_capacity: 1,
-            tick_interval_ms: 5,
-            batch_size: 100_000,
-            snapshot_depth: 5,
-            write_snapshot_csv: true,
-            snapshot_csv_path: "data/order_book_snapshot.csv".to_string(),
+        let request = ReplayTaskConfig {
             replay_start_date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
             replay_end_date: NaiveDate::from_ymd_opt(2026, 5, 13).unwrap(),
             replay_start_time: NaiveTime::from_hms_milli_opt(9, 30, 0, 0).unwrap(),
             replay_end_time: NaiveTime::from_hms_milli_opt(15, 0, 0, 0).unwrap(),
-            replay_codes: None,
+            replay_codes: Vec::new(),
             skip_intraday_breaks: false,
             replay_speed: 1.0,
         };

@@ -7,7 +7,7 @@ use tokio::task;
 
 use crate::trading::{CreateAccountRequest, TradingStore, TradingStoreError};
 
-use super::common::{ApiResponse, parse_query, parse_query_json, render_api_error};
+use super::common::{ApiResponse, parse_json_body, parse_query, render_api_error};
 
 /// 无效的创建账户请求
 const TRADING_INVALID_ACCOUNT_REQUEST_CODE: i32 = 2001;
@@ -49,7 +49,7 @@ impl Handler for CreateAccountHandler {
         res: &mut Response,
         _ctrl: &mut FlowCtrl,
     ) {
-        let Some(request) = parse_query_json::<CreateAccountRequest>(
+        let Some(request) = parse_json_body::<CreateAccountRequest>(
             req,
             res,
             TRADING_INVALID_ACCOUNT_REQUEST_CODE,

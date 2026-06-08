@@ -52,7 +52,7 @@ pub fn render_api_error_with_status(
     res.render(Json(ApiResponse::error(code, msg)));
 }
 
-pub async fn parse_query_json<T>(
+pub async fn parse_json_body<T>(
     req: &mut Request,
     res: &mut Response,
     error_code: i32,

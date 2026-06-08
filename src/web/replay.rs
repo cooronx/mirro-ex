@@ -5,8 +5,10 @@ use salvo::prelude::*;
 
 use crate::replay_manager::{ReplayManager, ReplayManagerError, ReplayStartRequest};
 
-use super::common::{ApiResponse, render_api_error};
+use super::common::{ApiResponse, parse_json_body, render_api_error};
 
+/// 无效的开始回放请求
+const REPLAY_INVALID_START_REQUEST_CODE: i32 = 1000;
 /// 已有进行中的回放
 const REPLAY_ACTIVE_EXISTS_CODE: i32 = 1001;
 /// 暂停回放时发生错误
@@ -79,9 +81,15 @@ impl Handler for StartReplayHandler {
         res: &mut Response,
         _ctrl: &mut FlowCtrl,
     ) {
-        let request = match req.parse_json::<ReplayStartRequest>().await {
-            Ok(request) => request,
-            Err(_) => ReplayStartRequest::default(),
+        let Some(request) = parse_json_body::<ReplayStartRequest>(
+            req,
+            res,
+            REPLAY_INVALID_START_REQUEST_CODE,
+            "invalid replay start request",
+        )
+        .await
+        else {
+            return;
         };
 
         match self.manager.start(request).await {

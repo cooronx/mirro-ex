@@ -28,17 +28,6 @@ write_snapshot_csv = true
 snapshot_csv_path = "data/order_book_snapshot.csv"
 # 每次从数据库拉取多少条事件，越小越省内存，但查询次数会更多
 batch_size = 100000
-# 回放日期范围，格式为 YYYY-MM-DD
-replay_start_date = "2026-05-12"
-replay_end_date = "2026-05-12"
-# 每天的回放时段，按东八区本地时间解释，格式为 HH:MM:SS.sss
-replay_start_time = "09:30:00.000"
-replay_end_time = "09:31:00.000"
-replay_codes = ["601899.XSHG", "300900.XSHE"]
-# 是否跳过 09:25-09:30 和 11:30-13:00 这两个非连续交易时段
-skip_intraday_breaks = false
-# 回放的速度
-replay_speed = 1.0
 
 [nats]
 url = "nats://127.0.0.1:4222"

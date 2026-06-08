@@ -2,14 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, NaiveTime};
 use serde::Deserialize;
-use serde::de::{self, Deserializer};
 
 pub const DEFAULT_CONFIG_PATH: &str = "config/conf.toml";
-const REPLAY_DATE_FORMAT: &str = "%Y-%m-%d";
-const REPLAY_TIME_FORMAT_WITH_MILLISECONDS: &str = "%H:%M:%S%.3f";
-const REPLAY_TIME_FORMAT_WITHOUT_MILLISECONDS: &str = "%H:%M:%S";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
@@ -62,19 +57,6 @@ pub struct ReplayConfig {
     pub write_snapshot_csv: bool,
     #[serde(default = "default_snapshot_csv_path")]
     pub snapshot_csv_path: String,
-    #[serde(deserialize_with = "deserialize_replay_date")]
-    pub replay_start_date: NaiveDate,
-    #[serde(deserialize_with = "deserialize_replay_date")]
-    pub replay_end_date: NaiveDate,
-    #[serde(deserialize_with = "deserialize_replay_time")]
-    pub replay_start_time: NaiveTime,
-    #[serde(deserialize_with = "deserialize_replay_time")]
-    pub replay_end_time: NaiveTime,
-    pub replay_codes: Option<Vec<String>>,
-    #[serde(default)]
-    pub skip_intraday_breaks: bool,
-    #[serde(default = "default_replay_speed")]
-    pub replay_speed: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -117,10 +99,6 @@ impl AppConfig {
         toml::from_str(&raw)
             .with_context(|| format!("failed to parse config file at {}", path.display()))
     }
-}
-
-fn default_replay_speed() -> f64 {
-    1.0
 }
 
 fn default_tick_interval_ms() -> u64 {
@@ -208,35 +186,4 @@ impl Default for DbSchemaConfig {
             trading_schema_path: default_trading_schema_path(),
         }
     }
-}
-
-fn deserialize_replay_date<'de, D>(deserializer: D) -> std::result::Result<NaiveDate, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = String::deserialize(deserializer)?;
-    parse_replay_date(&raw).map_err(de::Error::custom)
-}
-
-fn deserialize_replay_time<'de, D>(deserializer: D) -> std::result::Result<NaiveTime, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = String::deserialize(deserializer)?;
-    parse_replay_time(&raw).map_err(de::Error::custom)
-}
-
-fn parse_replay_date(raw: &str) -> std::result::Result<NaiveDate, String> {
-    let trimmed = raw.trim();
-    NaiveDate::parse_from_str(trimmed, REPLAY_DATE_FORMAT)
-        .map_err(|_| format!("invalid replay date format: {raw}, expected YYYY-MM-DD"))
-}
-
-fn parse_replay_time(raw: &str) -> std::result::Result<NaiveTime, String> {
-    let trimmed = raw.trim();
-    NaiveTime::parse_from_str(trimmed, REPLAY_TIME_FORMAT_WITH_MILLISECONDS)
-        .or_else(|_| NaiveTime::parse_from_str(trimmed, REPLAY_TIME_FORMAT_WITHOUT_MILLISECONDS))
-        .map_err(|_| {
-            format!("invalid replay time format: {raw}, expected HH:MM:SS or HH:MM:SS.sss")
-        })
 }
