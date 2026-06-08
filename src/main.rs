@@ -9,6 +9,7 @@ mod publisher;
 mod replay;
 mod replay_manager;
 mod sim_clock;
+mod snapshot_exporter;
 mod trading;
 mod web;
 

@@ -1,21 +1,19 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::path::Path;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use csv::Writer;
 use tracing::info;
 
 use crate::common::{L2Order, Market, OrderType};
 use crate::config::AppConfig;
-use crate::matcher::order_book::{LevelSnapshot, OrderBook, OrderBookSnapshot};
+use crate::matcher::order_book::{OrderBook, OrderBookSnapshot};
 use crate::publisher::NatsDispatcher;
 use crate::replay::{
     ReplayControl, ReplayController, ReplayEvent, ReplayHandler, ReplayRunReport,
     ReplayStatusReporter,
 };
 use crate::replay_manager::ReplayTaskConfig;
+use crate::snapshot_exporter::SnapshotParquetExporter;
 use tokio::sync::mpsc;
 
 struct OrderBookSnapshotHandler {
@@ -23,7 +21,7 @@ struct OrderBookSnapshotHandler {
     books: HashMap<String, OrderBook>,
     last_event_timestamps: HashMap<String, i64>,
     snapshot_depth: usize,
-    writer: Option<Writer<File>>,
+    exporter: Option<SnapshotParquetExporter>,
     dispatcher: NatsDispatcher,
 }
 
@@ -31,7 +29,7 @@ impl OrderBookSnapshotHandler {
     fn new(
         tracked_codes: Option<HashSet<String>>,
         snapshot_depth: usize,
-        writer: Option<Writer<File>>,
+        exporter: Option<SnapshotParquetExporter>,
         dispatcher: NatsDispatcher,
     ) -> Self {
         Self {
@@ -39,7 +37,7 @@ impl OrderBookSnapshotHandler {
             books: HashMap::new(),
             last_event_timestamps: HashMap::new(),
             snapshot_depth,
-            writer,
+            exporter,
             dispatcher,
         }
     }
@@ -80,13 +78,6 @@ impl OrderBookSnapshotHandler {
         }
     }
 
-    fn level_cell(levels: &[LevelSnapshot], index: usize) -> String {
-        levels
-            .get(index)
-            .map(|level| format!("{:.4}:{}", level.price as f64 / 10000.0, level.total_qty))
-            .unwrap_or_default()
-    }
-
     fn book_for_code(&mut self, code: &str) -> &mut OrderBook {
         self.books
             .entry(code.to_string())
@@ -104,23 +95,15 @@ impl OrderBookSnapshotHandler {
 
     async fn record_snapshot(&mut self, timestamp_ms: i64, code: &str) -> anyhow::Result<()> {
         let snapshot = self.current_snapshot(code);
-        let mut row = vec![timestamp_ms.to_string(), code.to_string()];
-        for index in 0..5 {
-            row.push(Self::level_cell(&snapshot.bids, index));
+        if let Some(exporter) = self.exporter.as_mut() {
+            exporter
+                .write_snapshot(timestamp_ms, code, &snapshot)
+                .context("failed to write order book snapshot parquet row")?;
         }
-        for index in 0..5 {
-            row.push(Self::level_cell(&snapshot.asks, index));
-        }
-
-        if let Some(writer) = self.writer.as_mut() {
-            writer
-                .write_record(&row)
-                .context("failed to write order book snapshot csv row")?;
-        }
-        self.dispatcher
-            .publish_snapshot(timestamp_ms, code, snapshot)
-            .await
-            .context("failed to publish order book snapshot to nats")?;
+        // self.dispatcher
+        //     .publish_snapshot(timestamp_ms, code, snapshot)
+        //     .await
+        //     .context("failed to publish order book snapshot to nats")?;
 
         Ok(())
     }
@@ -139,11 +122,6 @@ impl OrderBookSnapshotHandler {
                 self.record_snapshot(timestamp_ms, &code).await?;
             }
         }
-        if let Some(writer) = self.writer.as_mut() {
-            writer
-                .flush()
-                .context("failed to flush order book snapshot csv writer")?;
-        }
         Ok(())
     }
 }
@@ -153,6 +131,9 @@ impl ReplayHandler for OrderBookSnapshotHandler {
     async fn on_day_start(&mut self, day: &str) -> anyhow::Result<()> {
         self.books.clear();
         self.last_event_timestamps.clear();
+        if let Some(exporter) = self.exporter.as_mut() {
+            exporter.start_day(day)?;
+        }
         info!(day = %day, "reset order books for replay day");
         Ok(())
     }
@@ -204,6 +185,9 @@ impl ReplayHandler for OrderBookSnapshotHandler {
 
     async fn on_day_end(&mut self, day: &str) -> anyhow::Result<()> {
         self.flush().await?;
+        if let Some(exporter) = self.exporter.as_mut() {
+            exporter.close_day()?;
+        }
         info!(day = %day, "flushed order books for replay day");
         Ok(())
     }
@@ -231,33 +215,17 @@ async fn run_internal(
     task_config: ReplayTaskConfig,
     control: Option<ReplayControl>,
 ) -> Result<ReplayRunReport> {
-    let csv_output_path = config.replay.snapshot_csv_path.clone();
-    let write_snapshot_csv = config.replay.write_snapshot_csv;
-    let writer = if write_snapshot_csv {
-        let output_path = Path::new(&csv_output_path);
-        if let Some(parent) = output_path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent).context("failed to create csv output directory")?;
-        }
-        let output_file = File::create(output_path)
-            .with_context(|| format!("failed to create output csv at {}", output_path.display()))?;
-        let mut writer = Writer::from_writer(output_file);
-        writer
-            .write_record([
-                "ts", "code", "bid1", "bid2", "bid3", "bid4", "bid5", "ask1", "ask2", "ask3",
-                "ask4", "ask5",
-            ])
-            .context("failed to write csv header")?;
-        Some(writer)
+    let parquet_output_dir = config.replay.snapshot_parquet_dir.clone();
+    let write_snapshot_parquet = config.replay.write_snapshot_parquet;
+    let exporter = if write_snapshot_parquet {
+        Some(SnapshotParquetExporter::new(&parquet_output_dir))
     } else {
         None
     };
 
     info!(
-        write_snapshot_csv = write_snapshot_csv,
-        snapshot_csv_path = %csv_output_path,
+        write_snapshot_parquet = write_snapshot_parquet,
+        snapshot_parquet_dir = %parquet_output_dir,
         db_url = %config.db.url,
         db_name = %config.db.database,
         sh_order_table = %config.db.tables.sh_order,
@@ -294,7 +262,7 @@ async fn run_internal(
     let snapshot_depth = config.replay.snapshot_depth;
     let controller = ReplayController::new(config.db, config.replay, task_config);
     let mut handler =
-        OrderBookSnapshotHandler::new(tracked_codes, snapshot_depth, writer, dispatcher);
+        OrderBookSnapshotHandler::new(tracked_codes, snapshot_depth, exporter, dispatcher);
 
     let report = controller
         .replay_with_control(&mut handler, control)

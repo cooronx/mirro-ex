@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use thiserror::Error;
 use tracing::warn;
@@ -15,8 +15,8 @@ enum BookSide {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PriceLevel {
-    orders: VecDeque<OrderId>,
     total_qty: i64,
+    active_order_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +90,7 @@ impl OrderBook {
                 }
 
                 self.cancel_order_volume(
-                    Self::cancel_target_order_id(&order),
+                    Self::order_id(&order),
                     Self::cancel_qty_for_order_event(&order),
                 );
                 Ok(())
@@ -108,10 +108,10 @@ impl OrderBook {
             Market::XSHG => match transaction.deal_type.trim() {
                 "B" | "S" | "N" => {
                     if transaction.buy_number > 0 {
-                        self.reduce_order_if_present(transaction.buy_number, transaction.volume);
+                        self.reduce_visible_order(transaction.buy_number, transaction.volume);
                     }
                     if transaction.sell_number > 0 {
-                        self.reduce_order_if_present(transaction.sell_number, transaction.volume);
+                        self.reduce_visible_order(transaction.sell_number, transaction.volume);
                     }
                 }
                 _ => {
@@ -151,20 +151,18 @@ impl OrderBook {
     }
 
     pub fn snapshot(&mut self, depth: usize) -> OrderBookSnapshot {
-        self.cleanup_all_levels();
-
         let bids = self
             .bids
             .iter()
             .rev()
-            .take(depth)
             .filter_map(|(&price, level)| self.level_snapshot(price, level))
+            .take(depth)
             .collect();
         let asks = self
             .asks
             .iter()
-            .take(depth)
             .filter_map(|(&price, level)| self.level_snapshot(price, level))
+            .take(depth)
             .collect();
 
         OrderBookSnapshot { bids, asks }
@@ -196,25 +194,10 @@ impl OrderBook {
         self.finalize_holdings(&holding_ids)
     }
 
-    fn submit_limit_order(&mut self, order: L2Order) -> Result<()> {
+    fn submit_limit_order(&mut self, mut order: L2Order) -> Result<()> {
         let order_id = Self::order_id(&order);
-        let mut order = order;
-        let pending_cancel = self.pending_cancels.remove(&order_id).unwrap_or(0);
-        let pending_reduction = if order.market == Market::XSHG {
-            0
-        } else {
-            self.pending_reductions.remove(&order_id).unwrap_or(0)
-        };
-        let total_pending = pending_cancel.saturating_add(pending_reduction);
-        if total_pending > 0 {
-            if total_pending >= order.volume {
-                return Ok(());
-            }
-            order.volume -= total_pending;
-        }
-
-        if order.volume <= 0 {
-            return Err(OrderBookError::InvalidOrderVolume(order.volume));
+        if self.apply_pending_to_order(order_id, &mut order)? {
+            return Ok(());
         }
 
         self.insert_visible_order(order)
@@ -228,8 +211,8 @@ impl OrderBook {
         }
 
         let level = self.book_side_mut(side).entry(order.price).or_default();
-        level.orders.push_back(order_id);
         level.total_qty += order.volume;
+        level.active_order_count += 1;
         self.order_hash.insert(order_id, order);
         Ok(())
     }
@@ -244,25 +227,10 @@ impl OrderBook {
         self.submit_limit_order(order)
     }
 
-    fn submit_holding_market_order(&mut self, order: L2Order) -> Result<()> {
+    fn submit_holding_market_order(&mut self, mut order: L2Order) -> Result<()> {
         let order_id = Self::order_id(&order);
-        let mut order = order;
-        let pending_cancel = self.pending_cancels.remove(&order_id).unwrap_or(0);
-        let pending_reduction = if order.market == Market::XSHG {
-            0
-        } else {
-            self.pending_reductions.remove(&order_id).unwrap_or(0)
-        };
-        let total_pending = pending_cancel.saturating_add(pending_reduction);
-        if total_pending > 0 {
-            if total_pending >= order.volume {
-                return Ok(());
-            }
-            order.volume -= total_pending;
-        }
-
-        if order.volume <= 0 {
-            return Err(OrderBookError::InvalidOrderVolume(order.volume));
+        if self.apply_pending_to_order(order_id, &mut order)? {
+            return Ok(());
         }
 
         if self.contains_order_id(order_id) {
@@ -281,36 +249,28 @@ impl OrderBook {
         Ok(())
     }
 
+    fn apply_pending_to_order(&mut self, order_id: OrderId, order: &mut L2Order) -> Result<bool> {
+        let pending_cancel = self.pending_cancels.remove(&order_id).unwrap_or(0);
+        let pending_reduction = if order.market == Market::XSHG {
+            0
+        } else {
+            self.pending_reductions.remove(&order_id).unwrap_or(0)
+        };
+        let total_pending = pending_cancel.saturating_add(pending_reduction);
+
+        if total_pending > 0 && total_pending >= order.volume {
+            return Ok(true);
+        }
+        order.volume -= total_pending;
+
+        if order.volume <= 0 {
+            return Err(OrderBookError::InvalidOrderVolume(order.volume));
+        }
+        Ok(false)
+    }
+
     fn reduce_order(&mut self, order_id: OrderId, matched_qty: i64) -> i64 {
-        if let Some((side, price, remaining_qty)) = self.order_hash.get(&order_id).map(|order| {
-            (
-                Self::book_side_for_direction(order.direction).ok(),
-                order.price,
-                order.volume,
-            )
-        }) {
-            let Some(side) = side else {
-                return 0;
-            };
-
-            let reduced_qty = remaining_qty.min(matched_qty);
-            if reduced_qty <= 0 {
-                return 0;
-            }
-
-            let remove_order = if let Some(order) = self.order_hash.get_mut(&order_id) {
-                order.volume -= reduced_qty;
-                order.volume <= 0
-            } else {
-                false
-            };
-
-            if remove_order {
-                self.order_hash.remove(&order_id);
-            }
-
-            self.adjust_level_total_qty(side, price, reduced_qty);
-            self.remove_empty_level_if_drained(side, price);
+        if let Some(reduced_qty) = self.reduce_visible_order(order_id, matched_qty) {
             return reduced_qty;
         }
 
@@ -321,12 +281,33 @@ impl OrderBook {
         0
     }
 
-    fn reduce_order_if_present(&mut self, order_id: OrderId, matched_qty: i64) -> i64 {
-        if self.contains_order_id(order_id) {
-            self.reduce_order(order_id, matched_qty)
-        } else {
-            0
+    fn reduce_visible_order(&mut self, order_id: OrderId, qty: i64) -> Option<i64> {
+        let (side, price, remaining_qty) = self.order_hash.get(&order_id).and_then(|order| {
+            Some((
+                Self::book_side_for_direction(order.direction).ok()?,
+                order.price,
+                order.volume,
+            ))
+        })?;
+        let reduced_qty = remaining_qty.min(qty);
+        if reduced_qty <= 0 {
+            return Some(0);
         }
+
+        let remove_order = if let Some(order) = self.order_hash.get_mut(&order_id) {
+            order.volume -= reduced_qty;
+            order.volume <= 0
+        } else {
+            false
+        };
+        if remove_order {
+            self.order_hash.remove(&order_id);
+            self.decrement_level_order_count(side, price);
+        }
+
+        self.adjust_level_total_qty(side, price, reduced_qty);
+        self.remove_empty_level_if_drained(side, price);
+        Some(reduced_qty)
     }
 
     fn book_side_mut(&mut self, side: BookSide) -> &mut BTreeMap<i64, PriceLevel> {
@@ -350,10 +331,6 @@ impl OrderBook {
         } else {
             order.message_number
         }
-    }
-
-    fn cancel_target_order_id(order: &L2Order) -> OrderId {
-        Self::order_id(order)
     }
 
     fn cancel_qty_for_order_event(order: &L2Order) -> i64 {
@@ -380,35 +357,7 @@ impl OrderBook {
     }
 
     fn cancel_order_volume(&mut self, order_id: OrderId, cancel_qty: i64) -> i64 {
-        if let Some((side, price, remaining_qty)) = self.order_hash.get(&order_id).map(|order| {
-            (
-                Self::book_side_for_direction(order.direction).ok(),
-                order.price,
-                order.volume,
-            )
-        }) {
-            let Some(side) = side else {
-                return 0;
-            };
-
-            let reduced_qty = remaining_qty.min(cancel_qty);
-            if reduced_qty <= 0 {
-                return 0;
-            }
-
-            let remove_order = if let Some(order) = self.order_hash.get_mut(&order_id) {
-                order.volume -= reduced_qty;
-                order.volume <= 0
-            } else {
-                false
-            };
-
-            if remove_order {
-                self.order_hash.remove(&order_id);
-            }
-
-            self.adjust_level_total_qty(side, price, reduced_qty);
-            self.remove_empty_level_if_drained(side, price);
+        if let Some(reduced_qty) = self.reduce_visible_order(order_id, cancel_qty) {
             return reduced_qty;
         }
 
@@ -438,70 +387,36 @@ impl OrderBook {
         }
     }
 
+    fn decrement_level_order_count(&mut self, side: BookSide, price: i64) {
+        if let Some(level) = self.book_side_mut(side).get_mut(&price) {
+            level.active_order_count = level.active_order_count.saturating_sub(1);
+        }
+    }
+
     fn remove_empty_level_if_drained(&mut self, side: BookSide, price: i64) {
-        let should_remove = self.compact_level_front(side, price);
+        let should_remove = self
+            .book_side_mut(side)
+            .get(&price)
+            .is_none_or(|level| level.active_order_count == 0 || level.total_qty <= 0);
         if should_remove {
             self.book_side_mut(side).remove(&price);
         }
     }
 
-    fn compact_level_front(&mut self, side: BookSide, price: i64) -> bool {
-        loop {
-            let front_order_id = {
-                let Some(level) = self.book_side_mut(side).get_mut(&price) else {
-                    return true;
-                };
-                level.orders.front().copied()
-            };
-
-            let Some(order_id) = front_order_id else {
-                break;
-            };
-
-            if self.order_hash.contains_key(&order_id) {
-                break;
-            }
-
-            if let Some(level) = self.book_side_mut(side).get_mut(&price) {
-                level.orders.pop_front();
-            } else {
-                return true;
-            }
-        }
-
-        let Some(level) = self.book_side_mut(side).get_mut(&price) else {
-            return true;
-        };
-
-        level.orders.is_empty() || level.total_qty <= 0
-    }
-
-    fn cleanup_all_levels(&mut self) {
-        self.cleanup_side(BookSide::Bid);
-        self.cleanup_side(BookSide::Ask);
-    }
-
-    fn cleanup_side(&mut self, side: BookSide) {
-        let prices: Vec<i64> = match side {
-            BookSide::Bid => self.bids.keys().copied().collect(),
-            BookSide::Ask => self.asks.keys().copied().collect(),
-        };
-
-        for price in prices {
-            if self.compact_level_front(side, price) {
-                self.book_side_mut(side).remove(&price);
-            }
-        }
-    }
-
     fn best_price(&mut self, side: BookSide) -> Option<i64> {
         loop {
-            let price = match side {
-                BookSide::Bid => self.bids.last_key_value().map(|(&price, _)| price),
-                BookSide::Ask => self.asks.first_key_value().map(|(&price, _)| price),
+            let (price, is_empty) = match side {
+                BookSide::Bid => self
+                    .bids
+                    .last_key_value()
+                    .map(|(&price, level)| (price, Self::level_is_empty(level))),
+                BookSide::Ask => self
+                    .asks
+                    .first_key_value()
+                    .map(|(&price, level)| (price, Self::level_is_empty(level))),
             }?;
 
-            if self.compact_level_front(side, price) {
+            if is_empty {
                 self.book_side_mut(side).remove(&price);
                 continue;
             }
@@ -510,21 +425,19 @@ impl OrderBook {
         }
     }
 
-    fn level_snapshot(&self, price: i64, level: &PriceLevel) -> Option<LevelSnapshot> {
-        let order_count = level
-            .orders
-            .iter()
-            .filter(|order_id| self.order_hash.contains_key(order_id))
-            .count();
+    fn level_is_empty(level: &PriceLevel) -> bool {
+        level.active_order_count == 0 || level.total_qty <= 0
+    }
 
-        if order_count == 0 || level.total_qty <= 0 {
+    fn level_snapshot(&self, price: i64, level: &PriceLevel) -> Option<LevelSnapshot> {
+        if level.active_order_count == 0 || level.total_qty <= 0 {
             return None;
         }
 
         Some(LevelSnapshot {
             price,
             total_qty: level.total_qty,
-            order_count,
+            order_count: level.active_order_count,
         })
     }
 
@@ -571,8 +484,8 @@ impl OrderBook {
         matched_qty: i64,
         trade_price: i64,
     ) -> i64 {
-        if self.order_hash.contains_key(&order_id) {
-            return self.reduce_order(order_id, matched_qty);
+        if let Some(reduced_qty) = self.reduce_visible_order(order_id, matched_qty) {
+            return reduced_qty;
         }
 
         if let Some(holding) = self.holding_orders.get_mut(&order_id) {
@@ -752,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn inserts_limit_orders_and_keeps_fifo() {
+    fn inserts_limit_orders_and_aggregates_price_levels() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
@@ -772,16 +685,6 @@ mod tests {
         assert_eq!(snapshot.bids[0].order_count, 2);
         assert_eq!(snapshot.asks[0].price, 101_000);
         assert_eq!(snapshot.asks[0].total_qty, 30);
-        assert_eq!(
-            book.bids
-                .get(&100_000)
-                .unwrap()
-                .orders
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
     }
 
     #[test]
@@ -800,16 +703,6 @@ mod tests {
         assert_eq!(snapshot.bids[0].total_qty, 20);
         assert_eq!(snapshot.bids[0].order_count, 1);
         assert_eq!(book.best_bid_price(), Some(100_000));
-        assert_eq!(
-            book.bids
-                .get(&100_000)
-                .unwrap()
-                .orders
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![2]
-        );
     }
 
     #[test]
@@ -914,16 +807,7 @@ mod tests {
         let snapshot = book.snapshot(10);
         assert_eq!(snapshot.bids[0].price, 100_000);
         assert_eq!(snapshot.bids[0].total_qty, 17);
-        assert_eq!(
-            book.bids
-                .get(&100_000)
-                .unwrap()
-                .orders
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
+        assert_eq!(snapshot.bids[0].order_count, 2);
     }
 
     #[test]

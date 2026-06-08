@@ -53,10 +53,10 @@ pub struct ReplayConfig {
     pub batch_size: i64,
     #[serde(default = "default_snapshot_depth")]
     pub snapshot_depth: usize,
-    #[serde(default = "default_write_snapshot_csv")]
-    pub write_snapshot_csv: bool,
-    #[serde(default = "default_snapshot_csv_path")]
-    pub snapshot_csv_path: String,
+    #[serde(default = "default_write_snapshot_parquet")]
+    pub write_snapshot_parquet: bool,
+    #[serde(default = "default_snapshot_parquet_dir")]
+    pub snapshot_parquet_dir: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -110,15 +110,15 @@ fn default_replay_batch_size() -> i64 {
 }
 
 fn default_snapshot_depth() -> usize {
-    5
+    10
 }
 
-fn default_write_snapshot_csv() -> bool {
+fn default_write_snapshot_parquet() -> bool {
     true
 }
 
-fn default_snapshot_csv_path() -> String {
-    "data/order_book_snapshot.csv".to_string()
+fn default_snapshot_parquet_dir() -> String {
+    "data/order_book_snapshot".to_string()
 }
 
 fn default_log_level() -> String {

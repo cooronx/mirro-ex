@@ -60,8 +60,8 @@ pub struct ReplayEngineConfigView {
     pub tick_interval_ms: u64,
     pub batch_size: i64,
     pub snapshot_depth: usize,
-    pub write_snapshot_csv: bool,
-    pub snapshot_csv_path: String,
+    pub write_snapshot_parquet: bool,
+    pub snapshot_parquet_dir: String,
 }
 
 impl From<&ReplayConfig> for ReplayEngineConfigView {
@@ -71,8 +71,8 @@ impl From<&ReplayConfig> for ReplayEngineConfigView {
             tick_interval_ms: config.tick_interval_ms,
             batch_size: config.batch_size,
             snapshot_depth: config.snapshot_depth,
-            write_snapshot_csv: config.write_snapshot_csv,
-            snapshot_csv_path: config.snapshot_csv_path.clone(),
+            write_snapshot_parquet: config.write_snapshot_parquet,
+            snapshot_parquet_dir: config.snapshot_parquet_dir.clone(),
         }
     }
 }
