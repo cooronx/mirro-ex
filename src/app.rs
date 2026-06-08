@@ -150,6 +150,13 @@ impl OrderBookSnapshotHandler {
 
 #[async_trait]
 impl ReplayHandler for OrderBookSnapshotHandler {
+    async fn on_day_start(&mut self, day: &str) -> anyhow::Result<()> {
+        self.books.clear();
+        self.last_event_timestamps.clear();
+        info!(day = %day, "reset order books for replay day");
+        Ok(())
+    }
+
     async fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()> {
         for event in events {
             let event_code = self.canonical_event_code(event);
@@ -192,6 +199,12 @@ impl ReplayHandler for OrderBookSnapshotHandler {
             }
         }
 
+        Ok(())
+    }
+
+    async fn on_day_end(&mut self, day: &str) -> anyhow::Result<()> {
+        self.flush().await?;
+        info!(day = %day, "flushed order books for replay day");
         Ok(())
     }
 }

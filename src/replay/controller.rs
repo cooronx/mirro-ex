@@ -245,8 +245,16 @@ pub struct ReplayRunReport {
 }
 
 #[async_trait]
-pub trait ReplayHandler {
+pub trait ReplayHandler: Send {
+    async fn on_day_start(&mut self, _day: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn on_events(&mut self, events: &[ReplayEvent]) -> anyhow::Result<()>;
+
+    async fn on_day_end(&mut self, _day: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -497,6 +505,11 @@ impl ReplayController {
             });
         }
 
+        handler
+            .on_day_start(&daily_window.day)
+            .await
+            .map_err(ReplayControllerError::Handler)?;
+
         let clock = SimClock::new(
             daily_window.start_time_ms as u64,
             daily_window.end_time_ms as u64,
@@ -585,6 +598,11 @@ impl ReplayController {
                 break;
             }
         }
+
+        handler
+            .on_day_end(&daily_window.day)
+            .await
+            .map_err(ReplayControllerError::Handler)?;
 
         Ok(SingleDayReplayOutcome::Report {
             total_lag_ms,
