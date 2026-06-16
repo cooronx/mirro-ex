@@ -3,6 +3,7 @@
 /docs_for_agent
 .codex
 .agents
+helpers/
 data/
 __pycache__
 logs/

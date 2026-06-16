@@ -6,188 +6,44 @@ import argparse
 import bisect
 import csv
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from datetime import datetime, time
 from pathlib import Path
-from zoneinfo import ZoneInfo
+
+import pyarrow.parquet as parquet
 
 
-SH_TZ = ZoneInfo("Asia/Shanghai")
-MIDDAY_BREAK_START = time(11, 30, 0)
-MIDDAY_BREAK_END = time(13, 0, 0)
+DEPTH = 5
 
 
 @dataclass
 class BookRow:
-    ts_ms: int
-    code: str
-    bids: list[str]
-    asks: list[str]
+    ts: int
+    bids: list[tuple[float | None, int | None]]
+    asks: list[tuple[float | None, int | None]]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare L1 report rows against nearby order_book_snapshot rows."
+        description="Compare one L1 Parquet file with one replay snapshot Parquet file."
     )
-    parser.add_argument(
-        "--l1",
-        default="data/l1_report_stock_SH600410_2026-05-14_093000_103000.csv",
-        help="Path to L1 CSV.",
-    )
-    parser.add_argument(
-        "--snapshots",
-        default="data/order_book_snapshot.csv",
-        help="Path to replay snapshot CSV or Parquet file.",
-    )
+    parser.add_argument("l1", type=Path, help="L1 Parquet file.")
+    parser.add_argument("snapshots", type=Path, help="Replay snapshot Parquet file.")
     parser.add_argument(
         "--window-ms",
         type=int,
         default=3000,
-        help="Nearby search window in milliseconds on each side.",
+        help="Search window before and after each L1 timestamp, default: %(default)s.",
     )
     parser.add_argument(
-        "--unmatched-output",
-        default="data/l1_unmatched.csv",
-        help="Output CSV for L1 rows that have no exact snapshot match within the search window.",
-    )
-    parser.add_argument(
-        "--time-mismatch-output",
-        default="data/l1_snapshot_time_mismatch_samples.csv",
-        help="Output CSV containing nearby best-match snapshots whose timestamps differ.",
-    )
-    parser.add_argument(
-        "--time-mismatch-limit",
-        type=int,
-        default=10,
-        help="Maximum number of timestamp mismatch samples to write.",
+        "--mismatch-output",
+        type=Path,
+        help="Optional CSV output for rows without an exact five-level match.",
     )
     return parser.parse_args()
 
 
-def l1_time_to_ms(raw: str) -> int:
-    dt = datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=SH_TZ)
-    return int(dt.timestamp() * 1000)
-
-
-def timestamp_ms_to_time(timestamp_ms: int) -> str:
-    return datetime.fromtimestamp(timestamp_ms / 1000, tz=SH_TZ).strftime(
-        "%Y-%m-%d %H:%M:%S.%f"
-    )[:-3]
-
-
-def is_midday_break_l1_time(raw: str) -> bool:
-    dt = datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S")
-    current_time = dt.time()
-    return MIDDAY_BREAK_START < current_time < MIDDAY_BREAK_END
-
-
-def normalize_code(raw: str) -> str:
-    code = raw.strip()
-    if not code:
-        return code
-    if code.endswith(".XSHG") or code.endswith(".XSHE"):
-        return code
-    if code.startswith("SH") and len(code) > 2:
-        return f"{code[2:]}.XSHG"
-    if code.startswith("SZ") and len(code) > 2:
-        return f"{code[2:]}.XSHE"
-    return code
-
-
-def parse_snapshot_cell(raw: str) -> tuple[str, str]:
-    raw = raw.strip()
-    if not raw:
-        return ("", "")
-    price, qty = raw.split(":", 1)
-    return (price, qty)
-
-
-def normalize_price(raw: object) -> str:
-    if raw is None:
-        return ""
-    raw = str(raw).strip()
-    if not raw:
-        return ""
-    try:
-        return f"{Decimal(raw):.4f}"
-    except InvalidOperation:
-        return raw
-
-
-def normalize_qty(raw: object) -> str:
-    if raw is None:
-        return ""
-    raw = str(raw).strip()
-    if not raw:
-        return ""
-    try:
-        value = Decimal(raw)
-        if value == value.to_integral_value():
-            return str(int(value))
-    except InvalidOperation:
-        pass
-    return raw
-
-
-def normalize_level(price: object, qty: object) -> str:
-    price = normalize_price(price)
-    qty = normalize_qty(qty)
-    return f"{price}:{qty}" if price and qty else ""
-
-
-def csv_snapshot_fields(row: dict[str, str], prefix: str) -> list[str]:
-    return [
-        normalize_level(*parse_snapshot_cell(row[f"{prefix}{index}"]))
-        for index in range(1, 6)
-    ]
-
-
-def parquet_snapshot_fields(row: dict[str, object], prefix: str) -> list[str]:
-    return [
-        normalize_level(
-            row.get(f"{prefix}{index}_price"),
-            row.get(f"{prefix}{index}_size"),
-        )
-        for index in range(1, 6)
-    ]
-
-
-def l1_fields(row: dict[str, str], price_prefix: str, vol_prefix: str) -> list[str]:
-    fields: list[str] = []
-    for index in range(1, 6):
-        price = row.get(f"{price_prefix}{index}", "").strip()
-        vol = row.get(f"{vol_prefix}{index}", "").strip()
-        fields.append(normalize_level(price, vol))
-    return fields
-
-
-def load_csv_snapshots(path: Path) -> list[BookRow]:
-    rows: list[BookRow] = []
-    with path.open("r", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            rows.append(
-                BookRow(
-                    ts_ms=int(row["ts"]),
-                    code=normalize_code(row["code"]),
-                    bids=csv_snapshot_fields(row, "bid"),
-                    asks=csv_snapshot_fields(row, "ask"),
-                )
-            )
-    return rows
-
-
-def load_parquet_snapshots(path: Path) -> list[BookRow]:
-    try:
-        import pyarrow.parquet as parquet
-    except ImportError as exc:
-        raise SystemExit(
-            "reading Parquet snapshots requires pyarrow; install it with: "
-            "python3 -m pip install pyarrow"
-        ) from exc
-
+def required_columns() -> list[str]:
     columns = ["ts", "code"]
-    for index in range(1, 6):
+    for index in range(1, DEPTH + 1):
         columns.extend(
             [
                 f"ask{index}_price",
@@ -196,294 +52,202 @@ def load_parquet_snapshots(path: Path) -> list[BookRow]:
                 f"bid{index}_size",
             ]
         )
+    return columns
 
-    rows: list[BookRow] = []
-    parquet_file = parquet.ParquetFile(path)
-    for batch in parquet_file.iter_batches(columns=columns):
-        for row in batch.to_pylist():
-            rows.append(
-                BookRow(
-                    ts_ms=int(row["ts"]),
-                    code=normalize_code(row["code"]),
-                    bids=parquet_snapshot_fields(row, "bid"),
-                    asks=parquet_snapshot_fields(row, "ask"),
-                )
+
+def load_book(path: Path) -> tuple[str, list[BookRow]]:
+    rows = parquet.read_table(path, columns=required_columns()).to_pylist()
+    if not rows:
+        raise ValueError(f"Parquet file contains no rows: {path}")
+
+    codes = {str(row["code"]) for row in rows}
+    if len(codes) != 1:
+        raise ValueError(f"expected one code in {path}, found: {sorted(codes)}")
+
+    book_rows = []
+    for row in rows:
+        book_rows.append(
+            BookRow(
+                ts=int(row["ts"]),
+                bids=[
+                    normalize_level(
+                        row[f"bid{index}_price"],
+                        row[f"bid{index}_size"],
+                    )
+                    for index in range(1, DEPTH + 1)
+                ],
+                asks=[
+                    normalize_level(
+                        row[f"ask{index}_price"],
+                        row[f"ask{index}_size"],
+                    )
+                    for index in range(1, DEPTH + 1)
+                ],
             )
-    return rows
+        )
+
+    book_rows.sort(key=lambda row: row.ts)
+    return codes.pop(), book_rows
 
 
-def load_snapshots(path: Path) -> list[BookRow]:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        return load_csv_snapshots(path)
-    if suffix == ".parquet":
-        return load_parquet_snapshots(path)
-    raise SystemExit(
-        f"unsupported snapshot file type: {path}; expected .csv or .parquet"
-    )
+def normalize_level(
+    price: object,
+    size: object,
+) -> tuple[float | None, int | None]:
+    if price is None or size is None:
+        return None, None
+    return round(float(price), 4), int(size)
 
 
-def index_snapshots_by_code(
+def mismatch_count(left: BookRow, right: BookRow) -> int:
+    return len(find_differences(left, right))
+
+
+def find_differences(left: BookRow, right: BookRow) -> list[str]:
+    differences = []
+    for side, left_levels, right_levels in (
+        ("bid", left.bids, right.bids),
+        ("ask", left.asks, right.asks),
+    ):
+        for index, (left_level, right_level) in enumerate(
+            zip(left_levels, right_levels),
+            start=1,
+        ):
+            if left_level[0] != right_level[0]:
+                differences.append(f"{side}{index}_price")
+            if left_level[1] != right_level[1]:
+                differences.append(f"{side}{index}_size")
+    return differences
+
+
+def best_snapshot(
+    l1_row: BookRow,
     snapshots: list[BookRow],
-) -> dict[str, tuple[list[int], list[BookRow]]]:
-    grouped: dict[str, list[BookRow]] = {}
-    for snapshot in snapshots:
-        grouped.setdefault(snapshot.code, []).append(snapshot)
-
-    indexed: dict[str, tuple[list[int], list[BookRow]]] = {}
-    for code, rows in grouped.items():
-        rows.sort(key=lambda row: row.ts_ms)
-        indexed[code] = ([row.ts_ms for row in rows], rows)
-    return indexed
-
-
-def score_rows(l1_bids: list[str], l1_asks: list[str], snapshot: BookRow) -> int:
-    score = 0
-    for lhs, rhs in zip(l1_bids, snapshot.bids):
-        if lhs != rhs:
-            score += 1
-    for lhs, rhs in zip(l1_asks, snapshot.asks):
-        if lhs != rhs:
-            score += 1
-    return score
-
-
-def format_unmatched_row(
-    l1_row: dict[str, str],
-    l1_ts_ms: int,
-    l1_bids: list[str],
-    l1_asks: list[str],
-) -> dict[str, str]:
-    result: dict[str, str] = {
-        "l1_time": l1_row["time"],
-        "l1_ts_ms": str(l1_ts_ms),
-        "code": normalize_code(l1_row["code"]),
-    }
-
-    for index in range(5):
-        result[f"l1_bid{index + 1}"] = l1_bids[index]
-        result[f"l1_ask{index + 1}"] = l1_asks[index]
-
-    return result
-
-
-def format_time_mismatch_row(
-    l1_row: dict[str, str],
-    l1_ts_ms: int,
-    l1_bids: list[str],
-    l1_asks: list[str],
-    snapshot: BookRow,
-    mismatch_count: int,
-    within_window: bool,
-) -> dict[str, str]:
-    result = {
-        "code": normalize_code(l1_row["code"]),
-        "l1_time": l1_row["time"],
-        "l1_ts_ms": str(l1_ts_ms),
-        "snapshot_time": timestamp_ms_to_time(snapshot.ts_ms),
-        "snapshot_ts_ms": str(snapshot.ts_ms),
-        "delta_ms": str(snapshot.ts_ms - l1_ts_ms),
-        "book_mismatch_count": str(mismatch_count),
-        "exact_book_match": str(mismatch_count == 0).lower(),
-        "within_window": str(within_window).lower(),
-    }
-
-    for index in range(5):
-        result[f"l1_bid{index + 1}"] = l1_bids[index]
-        result[f"snapshot_bid{index + 1}"] = snapshot.bids[index]
-        result[f"l1_ask{index + 1}"] = l1_asks[index]
-        result[f"snapshot_ask{index + 1}"] = snapshot.asks[index]
-
-    return result
-
-
-def nearest_snapshot(
-    snapshot_ts: list[int],
-    snapshot_rows: list[BookRow],
-    target_ts_ms: int,
-) -> BookRow | None:
-    if not snapshot_rows:
+    snapshot_times: list[int],
+    window_ms: int,
+) -> tuple[BookRow, int] | None:
+    start = bisect.bisect_left(snapshot_times, l1_row.ts - window_ms)
+    end = bisect.bisect_right(snapshot_times, l1_row.ts + window_ms)
+    if start == end:
         return None
 
-    position = bisect.bisect_left(snapshot_ts, target_ts_ms)
-    candidate_indexes = [
-        index
-        for index in (position - 1, position)
-        if 0 <= index < len(snapshot_rows)
-    ]
-    return min(
-        (snapshot_rows[index] for index in candidate_indexes),
-        key=lambda snapshot: (abs(snapshot.ts_ms - target_ts_ms), snapshot.ts_ms),
+    candidates = snapshots[start:end]
+    snapshot = min(
+        candidates,
+        key=lambda row: (
+            mismatch_count(l1_row, row),
+            abs(row.ts - l1_row.ts),
+            row.ts,
+        ),
     )
+    return snapshot, mismatch_count(l1_row, snapshot)
 
 
-def write_csv(
-    path: Path,
-    rows: list[dict[str, str]],
-    empty_fieldnames: list[str],
-) -> None:
+def write_mismatches(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        with path.open("w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=empty_fieldnames)
-            writer.writeheader()
-        return
-
-    with path.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+    fieldnames = [
+        "l1_ts",
+        "snapshot_ts",
+        "delta_ms",
+        "mismatch_count",
+        "mismatch_fields",
+    ]
+    for side in ("bid", "ask"):
+        for index in range(1, DEPTH + 1):
+            fieldnames.extend(
+                [
+                    f"l1_{side}{index}_price",
+                    f"snapshot_{side}{index}_price",
+                    f"l1_{side}{index}_size",
+                    f"snapshot_{side}{index}_size",
+                ]
+            )
+    with path.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
 
-def main() -> None:
+def mismatch_row(
+    l1_row: BookRow,
+    snapshot: BookRow | None,
+) -> dict[str, object]:
+    differences = find_differences(l1_row, snapshot) if snapshot else []
+    row: dict[str, object] = {
+        "l1_ts": l1_row.ts,
+        "snapshot_ts": snapshot.ts if snapshot else "",
+        "delta_ms": snapshot.ts - l1_row.ts if snapshot else "",
+        "mismatch_count": len(differences) if snapshot else "",
+        "mismatch_fields": ",".join(differences) if snapshot else "no_snapshot_in_window",
+    }
+
+    for side in ("bid", "ask"):
+        l1_levels = getattr(l1_row, f"{side}s")
+        snapshot_levels = getattr(snapshot, f"{side}s") if snapshot else []
+        for index, l1_level in enumerate(l1_levels, start=1):
+            snapshot_level = (
+                snapshot_levels[index - 1]
+                if snapshot
+                else (None, None)
+            )
+            row[f"l1_{side}{index}_price"] = l1_level[0]
+            row[f"snapshot_{side}{index}_price"] = snapshot_level[0]
+            row[f"l1_{side}{index}_size"] = l1_level[1]
+            row[f"snapshot_{side}{index}_size"] = snapshot_level[1]
+    return row
+
+
+def main() -> int:
     args = parse_args()
-    l1_path = Path(args.l1)
-    snapshot_path = Path(args.snapshots)
-    unmatched_output_path = Path(args.unmatched_output)
-    time_mismatch_output_path = Path(args.time_mismatch_output)
+    if args.window_ms < 0:
+        raise ValueError("--window-ms must be greater than or equal to 0")
 
-    snapshots = load_snapshots(snapshot_path)
-    snapshot_index = index_snapshots_by_code(snapshots)
-    unmatched_rows_output: list[dict[str, str]] = []
-    time_mismatch_rows_output: list[dict[str, str]] = []
-    exact_match_rows = 0
-    total_rows = 0
-    skipped_midday_rows = 0
-
-    with l1_path.open("r", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for l1_row in reader:
-            if is_midday_break_l1_time(l1_row["time"]):
-                skipped_midday_rows += 1
-                continue
-
-            total_rows += 1
-            l1_ts_ms = l1_time_to_ms(l1_row["time"])
-            l1_bids = l1_fields(l1_row, "BuyPrice", "BuyVol")
-            l1_asks = l1_fields(l1_row, "SelPrice", "SelVol")
-            code = normalize_code(l1_row["code"])
-
-            indexed = snapshot_index.get(code)
-            if indexed is None:
-                unmatched_rows_output.append(
-                    format_unmatched_row(
-                        l1_row,
-                        l1_ts_ms,
-                        l1_bids,
-                        l1_asks,
-                    )
-                )
-                continue
-
-            snapshot_ts, snapshot_rows = indexed
-
-            candidates: list[tuple[int, int, BookRow]] = []
-            left = bisect.bisect_left(snapshot_ts, l1_ts_ms - args.window_ms)
-            right = bisect.bisect_right(snapshot_ts, l1_ts_ms + args.window_ms)
-            for snapshot in snapshot_rows[left:right]:
-                delta_ms = snapshot.ts_ms - l1_ts_ms
-                score = score_rows(l1_bids, l1_asks, snapshot)
-                candidates.append((score, abs(delta_ms), snapshot))
-
-            candidates.sort(key=lambda item: (item[0], item[1], item[2].ts_ms))
-
-            if not candidates:
-                nearest = nearest_snapshot(snapshot_ts, snapshot_rows, l1_ts_ms)
-                if (
-                    nearest is not None
-                    and nearest.ts_ms != l1_ts_ms
-                    and len(time_mismatch_rows_output) < args.time_mismatch_limit
-                ):
-                    time_mismatch_rows_output.append(
-                        format_time_mismatch_row(
-                            l1_row,
-                            l1_ts_ms,
-                            l1_bids,
-                            l1_asks,
-                            nearest,
-                            score_rows(l1_bids, l1_asks, nearest),
-                            False,
-                        )
-                    )
-                unmatched_rows_output.append(
-                    format_unmatched_row(
-                        l1_row,
-                        l1_ts_ms,
-                        l1_bids,
-                        l1_asks,
-                    )
-                )
-                continue
-
-            best_score, _, best_snapshot = candidates[0]
-            if (
-                best_snapshot.ts_ms != l1_ts_ms
-                and len(time_mismatch_rows_output) < args.time_mismatch_limit
-            ):
-                time_mismatch_rows_output.append(
-                    format_time_mismatch_row(
-                        l1_row,
-                        l1_ts_ms,
-                        l1_bids,
-                        l1_asks,
-                        best_snapshot,
-                        best_score,
-                        True,
-                    )
-                )
-
-            if best_score == 0:
-                exact_match_rows += 1
-            else:
-                unmatched_rows_output.append(
-                    format_unmatched_row(
-                        l1_row,
-                        l1_ts_ms,
-                        l1_bids,
-                        l1_asks,
-                    )
-                )
-
-    unmatched_fieldnames = ["l1_time", "l1_ts_ms", "code"]
-    for index in range(1, 6):
-        unmatched_fieldnames.extend([f"l1_bid{index}", f"l1_ask{index}"])
-    write_csv(unmatched_output_path, unmatched_rows_output, unmatched_fieldnames)
-
-    time_mismatch_fieldnames = [
-        "code",
-        "l1_time",
-        "l1_ts_ms",
-        "snapshot_time",
-        "snapshot_ts_ms",
-        "delta_ms",
-        "book_mismatch_count",
-        "exact_book_match",
-        "within_window",
-    ]
-    for index in range(1, 6):
-        time_mismatch_fieldnames.extend(
-            [
-                f"l1_bid{index}",
-                f"snapshot_bid{index}",
-                f"l1_ask{index}",
-                f"snapshot_ask{index}",
-            ]
+    l1_code, l1_rows = load_book(args.l1)
+    snapshot_code, snapshots = load_book(args.snapshots)
+    if l1_code != snapshot_code:
+        raise ValueError(
+            f"code mismatch: L1 contains {l1_code}, snapshots contain {snapshot_code}"
         )
-    write_csv(
-        time_mismatch_output_path,
-        time_mismatch_rows_output,
-        time_mismatch_fieldnames,
-    )
 
-    unmatched_rows = total_rows - exact_match_rows
-    print(f"total_l1_rows={total_rows}")
-    print(f"exact_match_rows={exact_match_rows}")
-    print(f"unmatched_l1_rows={unmatched_rows}")
-    print(f"skipped_midday_l1_rows={skipped_midday_rows}")
-    print(f"unmatched_output={unmatched_output_path}")
-    print(f"time_mismatch_samples={len(time_mismatch_rows_output)}")
-    print(f"time_mismatch_output={time_mismatch_output_path}")
+    snapshot_times = [row.ts for row in snapshots]
+    exact_matches = 0
+    no_candidates = 0
+    mismatches: list[dict[str, object]] = []
+
+    for l1_row in l1_rows:
+        result = best_snapshot(
+            l1_row,
+            snapshots,
+            snapshot_times,
+            args.window_ms,
+        )
+        if result is None:
+            no_candidates += 1
+            mismatches.append(mismatch_row(l1_row, None))
+            continue
+
+        snapshot, differences = result
+        if differences == 0:
+            exact_matches += 1
+            continue
+
+        mismatches.append(mismatch_row(l1_row, snapshot))
+
+    print(f"code={l1_code}")
+    print(f"total_l1_rows={len(l1_rows)}")
+    print(f"l1_time_range={l1_rows[0].ts}..{l1_rows[-1].ts}")
+    print(f"snapshot_time_range={snapshots[0].ts}..{snapshots[-1].ts}")
+    print(f"exact_match_rows={exact_matches}")
+    print(f"mismatch_rows={len(mismatches)}")
+    print(f"no_snapshot_in_window={no_candidates}")
+    print(f"match_rate={exact_matches / len(l1_rows):.2%}")
+
+    if args.mismatch_output:
+        write_mismatches(args.mismatch_output, mismatches)
+        print(f"mismatch_output={args.mismatch_output}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
