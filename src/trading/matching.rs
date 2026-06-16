@@ -2,31 +2,20 @@ use rusqlite::Connection;
 
 use crate::db::queries::trading_account_query::{settle_buy_cash, settle_sell_cash};
 use crate::db::queries::trading_position_query::{apply_buy_fill, apply_sell_fill};
-use crate::matcher::order_book::{LevelSnapshot, OrderBookSnapshot};
+use crate::matcher::order_book::LevelSnapshot;
 
 use super::error::{StoreResult, TradingStoreError};
 use super::model::{Fill, SIDE_BUY, SIDE_SELL, TradingOrder};
 use super::util::checked_amount;
 
-pub(super) fn planned_fills(order: &TradingOrder, snapshot: &OrderBookSnapshot) -> Vec<(i64, i64)> {
+pub(super) fn planned_fills_from_levels(
+    order: &TradingOrder,
+    levels: &[LevelSnapshot],
+) -> Vec<(i64, i64)> {
     let mut remaining = order.qty - order.filled_qty;
     if remaining <= 0 {
         return Vec::new();
     }
-
-    let levels: Vec<&LevelSnapshot> = match order.side.as_str() {
-        SIDE_BUY => snapshot
-            .asks
-            .iter()
-            .filter(|level| level.price <= order.price)
-            .collect(),
-        SIDE_SELL => snapshot
-            .bids
-            .iter()
-            .filter(|level| level.price >= order.price)
-            .collect(),
-        _ => Vec::new(),
-    };
 
     let mut fills = Vec::new();
     for level in levels {

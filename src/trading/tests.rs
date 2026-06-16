@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::fs;
 
 use rusqlite::{Connection, params};
 
-use super::{CreateAccountRequest, CreateLimitOrderRequest, TradingStore, TradingStoreError};
-use crate::matcher::order_book::{LevelSnapshot, OrderBookSnapshot};
+use super::{
+    CreateAccountRequest, CreateLimitOrderRequest, SIDE_BUY, TradingStore, TradingStoreError,
+};
+use crate::matcher::order_book::LevelSnapshot;
 
 fn test_store(name: &str) -> (TradingStore, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!(
@@ -67,7 +70,7 @@ fn create_buy_limit_order_freezes_cash() {
         )
         .unwrap();
 
-    assert_eq!(order.status, "working");
+    assert_eq!(order.status, "new");
     assert_eq!(account_cash(&path, "u1"), (10_000, 8_000, 2_000));
     let _ = fs::remove_file(path);
 }
@@ -94,21 +97,17 @@ fn buy_limit_order_matches_ask_and_updates_account_position() {
         )
         .unwrap();
 
-    let snapshot = OrderBookSnapshot {
-        bids: vec![],
-        asks: vec![LevelSnapshot {
-            price: 90,
-            total_qty: 5,
-            order_count: 1,
-        }],
-    };
+    let marketable_levels = vec![LevelSnapshot {
+        price: 90,
+        total_qty: 5,
+        order_count: 1,
+    }];
 
-    assert_eq!(
-        store
-            .match_limit_orders("300274.XSHE", &snapshot, 1_100)
-            .unwrap(),
-        1
-    );
+    let (fill_count, queue_ahead_qty) = store
+        .initialize_limit_order_queue(&order, &marketable_levels, 0, 1_100)
+        .unwrap();
+    assert_eq!(fill_count, 1);
+    assert_eq!(queue_ahead_qty, Some(0));
     let orders = store.list_orders("u1").unwrap();
     assert_eq!(orders[0].order_id, order.order_id);
     assert_eq!(orders[0].filled_qty, 5);
@@ -139,7 +138,7 @@ fn sell_limit_order_freezes_position_and_settles_fill() {
             .unwrap();
     }
 
-    store
+    let order = store
         .create_limit_order(
             CreateLimitOrderRequest {
                 user_id: "u1".to_string(),
@@ -153,16 +152,13 @@ fn sell_limit_order_freezes_position_and_settles_fill() {
         .unwrap();
     assert_eq!(position_qty(&path, "u1", "300274.XSHE"), (10, 4, 6, 80));
 
-    let snapshot = OrderBookSnapshot {
-        bids: vec![LevelSnapshot {
-            price: 100,
-            total_qty: 6,
-            order_count: 1,
-        }],
-        asks: vec![],
-    };
+    let marketable_levels = vec![LevelSnapshot {
+        price: 100,
+        total_qty: 6,
+        order_count: 1,
+    }];
     store
-        .match_limit_orders("300274.XSHE", &snapshot, 1_100)
+        .initialize_limit_order_queue(&order, &marketable_levels, 0, 1_100)
         .unwrap();
 
     let orders = store.list_orders("u1").unwrap();
@@ -170,6 +166,58 @@ fn sell_limit_order_freezes_position_and_settles_fill() {
     assert_eq!(orders[0].status, "filled");
     assert_eq!(account_cash(&path, "u1"), (1_600, 1_600, 0));
     assert_eq!(position_qty(&path, "u1", "300274.XSHE"), (4, 4, 0, 80));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn queued_buy_order_waits_for_real_trade_volume_before_filling() {
+    let (store, path) = test_store("queue-fill");
+    store
+        .create_account(CreateAccountRequest {
+            user_id: "u1".to_string(),
+            initial_cash: 10_000,
+        })
+        .unwrap();
+    let order = store
+        .create_limit_order(
+            CreateLimitOrderRequest {
+                user_id: "u1".to_string(),
+                code: "300274.XSHE".to_string(),
+                side: "buy".to_string(),
+                price: 100,
+                qty: 10,
+            },
+            1_000,
+        )
+        .unwrap();
+
+    let (fill_count, queue_ahead_qty) = store
+        .initialize_limit_order_queue(&order, &[], 8, 1_050)
+        .unwrap();
+    assert_eq!(fill_count, 0);
+    assert_eq!(queue_ahead_qty, Some(8));
+    let mut order_queues = HashMap::from([(order.order_id.clone(), queue_ahead_qty.unwrap())]);
+
+    assert_eq!(
+        store
+            .match_queued_limit_orders("300274.XSHE", SIDE_BUY, 100, 5, 1_100, &mut order_queues)
+            .unwrap(),
+        0
+    );
+    assert_eq!(order_queues.get(&order.order_id), Some(&3));
+
+    assert_eq!(
+        store
+            .match_queued_limit_orders("300274.XSHE", SIDE_BUY, 100, 6, 1_200, &mut order_queues)
+            .unwrap(),
+        1
+    );
+    let orders = store.list_orders("u1").unwrap();
+    assert_eq!(orders[0].filled_qty, 3);
+    assert_eq!(orders[0].status, "partially_filled");
+    assert_eq!(order_queues.get(&order.order_id), Some(&0));
+    assert_eq!(account_cash(&path, "u1"), (9_700, 9_000, 700));
+    assert_eq!(position_qty(&path, "u1", "300274.XSHE"), (3, 3, 0, 100));
     let _ = fs::remove_file(path);
 }
 

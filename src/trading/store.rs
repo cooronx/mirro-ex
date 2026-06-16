@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rusqlite::Connection;
@@ -7,16 +8,17 @@ use crate::db::queries::trading_account_query::{
 };
 use crate::db::queries::trading_fill_query::insert_fill;
 use crate::db::queries::trading_order_query::{
-    insert_order, query_matchable_orders_by_code, query_orders_by_user_id, update_order_fill,
+    insert_order, query_new_orders_by_code, query_orders_by_user_id,
+    query_working_orders_by_code_price_side, update_order_fill,
 };
 use crate::db::queries::trading_position_query::freeze_position;
-use crate::matcher::order_book::OrderBookSnapshot;
+use crate::matcher::order_book::LevelSnapshot;
 
 use super::error::{StoreResult, TradingStoreError};
-use super::matching::{apply_fill, planned_fills};
+use super::matching::{apply_fill, planned_fills_from_levels};
 use super::model::{
     Account, CreateAccountRequest, CreateLimitOrderRequest, Fill, ORDER_TYPE_LIMIT, SIDE_BUY,
-    SIDE_SELL, STATUS_FILLED, STATUS_PARTIALLY_FILLED, STATUS_WORKING, TradingOrder,
+    SIDE_SELL, STATUS_FILLED, STATUS_NEW, STATUS_PARTIALLY_FILLED, STATUS_WORKING, TradingOrder,
 };
 use super::util::{
     FILL_COUNTER, ORDER_COUNTER, checked_amount, current_unix_timestamp_ms, next_id, normalize_side,
@@ -113,7 +115,7 @@ impl TradingStore {
             price: request.price,
             qty: request.qty,
             filled_qty: 0,
-            status: STATUS_WORKING.to_string(),
+            status: STATUS_NEW.to_string(),
             created_at: sim_now_ms,
             updated_at: sim_now_ms,
         };
@@ -185,12 +187,87 @@ impl TradingStore {
         })
     }
 
-    pub fn match_limit_orders(
+    pub fn new_limit_orders(&self, code: &str) -> StoreResult<Vec<TradingOrder>> {
+        let connection = self.open_connection()?;
+        query_new_orders_by_code(&connection, code).map_err(|source| {
+            TradingStoreError::MatchOrders {
+                code: code.to_string(),
+                source,
+            }
+        })
+    }
+
+    pub fn initialize_limit_order_queue(
+        &self,
+        order: &TradingOrder,
+        marketable_levels: &[LevelSnapshot],
+        queue_ahead_qty: i64,
+        timestamp_ms: i64,
+    ) -> StoreResult<(usize, Option<i64>)> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| TradingStoreError::MatchOrders {
+                code: order.code.clone(),
+                source,
+            })?;
+
+        let mut fill_count = 0;
+        let mut filled_qty = order.filled_qty;
+        for (fill_price, fill_qty) in planned_fills_from_levels(order, marketable_levels) {
+            let fill = Fill {
+                fill_id: next_id("fill", timestamp_ms, &FILL_COUNTER),
+                order_id: order.order_id.clone(),
+                user_id: order.user_id.clone(),
+                code: order.code.clone(),
+                side: order.side.clone(),
+                price: fill_price,
+                qty: fill_qty,
+                filled_at: timestamp_ms,
+            };
+            apply_fill(&tx, order, &fill)?;
+            insert_fill(&tx, &fill).map_err(|source| TradingStoreError::MatchOrders {
+                code: order.code.clone(),
+                source,
+            })?;
+            filled_qty += fill_qty;
+            fill_count += 1;
+        }
+
+        let status = if filled_qty >= order.qty {
+            STATUS_FILLED
+        } else if filled_qty > 0 {
+            STATUS_PARTIALLY_FILLED
+        } else {
+            STATUS_WORKING
+        };
+        update_order_fill(&tx, &order.order_id, filled_qty, status, timestamp_ms).map_err(
+            |source| TradingStoreError::MatchOrders {
+                code: order.code.clone(),
+                source,
+            },
+        )?;
+        tx.commit()
+            .map_err(|source| TradingStoreError::MatchOrders {
+                code: order.code.clone(),
+                source,
+            })?;
+        let queue_ahead_qty = (filled_qty < order.qty).then_some(queue_ahead_qty);
+        Ok((fill_count, queue_ahead_qty))
+    }
+
+    pub fn match_queued_limit_orders(
         &self,
         code: &str,
-        snapshot: &OrderBookSnapshot,
+        resting_side: &str,
+        price: i64,
+        volume: i64,
         timestamp_ms: i64,
+        order_queues: &mut HashMap<String, i64>,
     ) -> StoreResult<usize> {
+        if volume <= 0 {
+            return Ok(0);
+        }
         let mut connection = self.open_connection()?;
         let tx = connection
             .transaction()
@@ -198,29 +275,42 @@ impl TradingStore {
                 code: code.to_string(),
                 source,
             })?;
-        let orders = query_matchable_orders_by_code(&tx, code).map_err(|source| {
-            TradingStoreError::MatchOrders {
+        let orders = query_working_orders_by_code_price_side(&tx, code, price, resting_side)
+            .map_err(|source| TradingStoreError::MatchOrders {
                 code: code.to_string(),
                 source,
-            }
-        })?;
+            })?;
 
         let mut fill_count = 0;
-        for order in orders {
-            let fills = planned_fills(&order, snapshot);
-            if fills.is_empty() {
+        let mut remaining_trade_volume = volume;
+        for queued in orders {
+            if remaining_trade_volume <= 0 {
+                break;
+            }
+            let order = queued;
+            let Some(current_queue_ahead_qty) = order_queues.get(&order.order_id).copied() else {
+                continue;
+            };
+            let queue_consumed = current_queue_ahead_qty.min(remaining_trade_volume);
+            let queue_ahead_qty = current_queue_ahead_qty - queue_consumed;
+            remaining_trade_volume -= queue_consumed;
+            if queue_ahead_qty > 0 {
+                order_queues.insert(order.order_id.clone(), queue_ahead_qty);
                 continue;
             }
+            order_queues.insert(order.order_id.clone(), 0);
 
+            let open_qty = order.qty - order.filled_qty;
+            let fill_qty = open_qty.min(remaining_trade_volume);
             let mut filled_qty = order.filled_qty;
-            for (fill_price, fill_qty) in fills {
+            if fill_qty > 0 {
                 let fill = Fill {
                     fill_id: next_id("fill", timestamp_ms, &FILL_COUNTER),
                     order_id: order.order_id.clone(),
                     user_id: order.user_id.clone(),
                     code: order.code.clone(),
                     side: order.side.clone(),
-                    price: fill_price,
+                    price,
                     qty: fill_qty,
                     filled_at: timestamp_ms,
                 };
@@ -230,6 +320,7 @@ impl TradingStore {
                     source,
                 })?;
                 filled_qty += fill_qty;
+                remaining_trade_volume -= fill_qty;
                 fill_count += 1;
             }
 
@@ -244,6 +335,9 @@ impl TradingStore {
                     source,
                 },
             )?;
+            if filled_qty >= order.qty {
+                order_queues.remove(&order.order_id);
+            }
         }
 
         tx.commit()

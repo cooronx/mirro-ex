@@ -59,7 +59,7 @@ pub fn query_orders_by_user_id(
     rows.collect()
 }
 
-pub fn query_matchable_orders_by_code(
+pub fn query_new_orders_by_code(
     connection: &Connection,
     code: &str,
 ) -> rusqlite::Result<Vec<TradingOrder>> {
@@ -79,11 +79,43 @@ pub fn query_matchable_orders_by_code(
          FROM orders
          WHERE code = ?1
            AND order_type = 'limit'
-           AND status IN ('working', 'partially_filled')
+           AND status = 'new'
            AND filled_qty < qty
          ORDER BY created_at ASC",
     )?;
     let rows = statement.query_map(params![code], order_from_row)?;
+    rows.collect()
+}
+
+pub fn query_working_orders_by_code_price_side(
+    connection: &Connection,
+    code: &str,
+    price: i64,
+    side: &str,
+) -> rusqlite::Result<Vec<TradingOrder>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            order_id,
+            user_id,
+            code,
+            side,
+            order_type,
+            price,
+            qty,
+            filled_qty,
+            status,
+            created_at,
+            updated_at
+         FROM orders
+         WHERE code = ?1
+           AND price = ?2
+           AND side = ?3
+           AND order_type = 'limit'
+           AND status IN ('working', 'partially_filled')
+           AND filled_qty < qty
+         ORDER BY created_at ASC",
+    )?;
+    let rows = statement.query_map(params![code, price, side], order_from_row)?;
     rows.collect()
 }
 

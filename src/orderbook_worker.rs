@@ -18,11 +18,11 @@ use std::thread::{self, JoinHandle};
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::oneshot;
 
-use crate::common::{L2Order, Market, OrderType};
+use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
 use crate::matcher::order_book::OrderBook;
 use crate::replay::ReplayEvent;
 use crate::snapshot_exporter::SnapshotParquetExporter;
-use crate::trading::TradingStore;
+use crate::trading::{SIDE_BUY, SIDE_SELL, TradingStore};
 
 type WorkerReply = oneshot::Sender<Result<()>>;
 
@@ -50,6 +50,7 @@ struct CodeState {
     book: OrderBook,
     last_event_timestamp: Option<i64>,
     exporter: Option<SnapshotParquetExporter>,
+    simulated_order_queues: HashMap<String, i64>,
 }
 
 impl CodeState {
@@ -58,6 +59,7 @@ impl CodeState {
             book: OrderBook::new(),
             last_event_timestamp: None,
             exporter: None,
+            simulated_order_queues: HashMap::new(),
         }
     }
 }
@@ -90,6 +92,10 @@ impl WorkerState {
     fn process_event(&mut self, event: ReplayEvent) -> Result<()> {
         let code = canonical_event_code(&event);
         let timestamp_ms = event.timestamp_ms();
+        let transaction_for_matching = match &event {
+            ReplayEvent::Transaction(transaction) => Some(transaction.clone()),
+            ReplayEvent::Order(_) => None,
+        };
         let state = self
             .codes
             .entry(code.clone())
@@ -125,10 +131,9 @@ impl WorkerState {
         if !state.book.has_unsettled_holdings() {
             let snapshot = self.current_snapshot(&code, timestamp_ms)?;
             self.record_snapshot(&code, timestamp_ms, &snapshot)?;
-            if let Some(trading_store) = &self.trading_store {
-                trading_store
-                    .match_limit_orders(&code, &snapshot, timestamp_ms)
-                    .with_context(|| format!("failed to match simulated orders for code={code}"))?;
+            self.initialize_simulated_orders(&code, timestamp_ms)?;
+            if let Some(transaction) = transaction_for_matching {
+                self.match_simulated_orders_from_transaction(&code, &transaction, timestamp_ms)?;
             }
         }
         Ok(())
@@ -189,6 +194,89 @@ impl WorkerState {
         Ok(())
     }
 
+    fn initialize_simulated_orders(&mut self, code: &str, timestamp_ms: i64) -> Result<()> {
+        let Some(trading_store) = self.trading_store.clone() else {
+            return Ok(());
+        };
+        let orders = trading_store
+            .new_limit_orders(code)
+            .with_context(|| format!("failed to query new simulated orders for code={code}"))?;
+        if orders.is_empty() {
+            return Ok(());
+        }
+
+        for order in orders {
+            let (marketable_levels, queue_ahead_qty) = {
+                let state = self
+                    .codes
+                    .get(code)
+                    .context("missing order book state for simulated order initialization")?;
+                let direction = order_side_to_direction(&order.side);
+                (
+                    state.book.marketable_levels(direction, order.price),
+                    state.book.visible_qty_at(direction, order.price),
+                )
+            };
+            let (_, queued_qty) = trading_store
+                .initialize_limit_order_queue(
+                    &order,
+                    &marketable_levels,
+                    queue_ahead_qty,
+                    timestamp_ms,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to initialize simulated order queue for code={} order_id={}",
+                        code, order.order_id
+                    )
+                })?;
+            if let Some(queue_ahead_qty) = queued_qty {
+                let state = self
+                    .codes
+                    .get_mut(code)
+                    .context("missing order book state for simulated order queue insert")?;
+                state
+                    .simulated_order_queues
+                    .insert(order.order_id.clone(), queue_ahead_qty);
+            }
+        }
+        Ok(())
+    }
+
+    fn match_simulated_orders_from_transaction(
+        &mut self,
+        code: &str,
+        transaction: &L2Transaction,
+        timestamp_ms: i64,
+    ) -> Result<()> {
+        let Some(trading_store) = self.trading_store.clone() else {
+            return Ok(());
+        };
+        let Some(resting_side) = transaction_resting_side(transaction) else {
+            return Ok(());
+        };
+        let state = self
+            .codes
+            .get_mut(code)
+            .context("missing order book state for simulated order matching")?;
+        trading_store
+            .match_queued_limit_orders(
+                code,
+                resting_side,
+                transaction.price,
+                transaction.volume,
+                timestamp_ms,
+                &mut state.simulated_order_queues,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to match simulated queued orders for code={} price={}",
+                    code, transaction.price
+                )
+            })?;
+        Ok(())
+    }
+
     fn close_day(&mut self) -> Result<()> {
         let codes = self.codes.keys().cloned().collect::<Vec<_>>();
         for code in codes {
@@ -208,13 +296,7 @@ impl WorkerState {
                 if let Some(timestamp_ms) = timestamp_ms {
                     let snapshot = self.current_snapshot(&code, timestamp_ms)?;
                     self.record_snapshot(&code, timestamp_ms, &snapshot)?;
-                    if let Some(trading_store) = &self.trading_store {
-                        trading_store
-                            .match_limit_orders(&code, &snapshot, timestamp_ms)
-                            .with_context(|| {
-                                format!("failed to match simulated orders for code={code}")
-                            })?;
-                    }
+                    self.initialize_simulated_orders(&code, timestamp_ms)?;
                 }
             }
 
@@ -409,6 +491,45 @@ fn canonical_code(code: &str, market: Market) -> String {
         Market::XSHG => format!("{code}.XSHG"),
         Market::XSHE => format!("{code}.XSHE"),
         Market::Unknown => code.to_string(),
+    }
+}
+
+fn order_side_to_direction(side: &str) -> OrderDirection {
+    match side {
+        SIDE_BUY => OrderDirection::Buy,
+        SIDE_SELL => OrderDirection::Sell,
+        _ => OrderDirection::Unknown,
+    }
+}
+
+fn transaction_resting_side(transaction: &L2Transaction) -> Option<&'static str> {
+    let deal_type = transaction.deal_type.trim();
+    match transaction.market {
+        Market::XSHG => match deal_type {
+            "B" => Some(SIDE_SELL),
+            "S" => Some(SIDE_BUY),
+            "N" => infer_resting_side_from_order_numbers(transaction),
+            _ => None,
+        },
+        Market::XSHE => match deal_type {
+            "F" => infer_resting_side_from_order_numbers(transaction),
+            "4" => None,
+            _ => None,
+        },
+        Market::Unknown => infer_resting_side_from_order_numbers(transaction),
+    }
+}
+
+fn infer_resting_side_from_order_numbers(transaction: &L2Transaction) -> Option<&'static str> {
+    if transaction.buy_number <= 0 || transaction.sell_number <= 0 {
+        return None;
+    }
+    if transaction.buy_number > transaction.sell_number {
+        Some(SIDE_SELL)
+    } else if transaction.sell_number > transaction.buy_number {
+        Some(SIDE_BUY)
+    } else {
+        None
     }
 }
 

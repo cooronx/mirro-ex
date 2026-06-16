@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const SIDE_BUY: &str = "buy";
 pub const SIDE_SELL: &str = "sell";
 pub const ORDER_TYPE_LIMIT: &str = "limit";
+pub const STATUS_NEW: &str = "new";
 pub const STATUS_WORKING: &str = "working";
 pub const STATUS_PARTIALLY_FILLED: &str = "partially_filled";
 pub const STATUS_FILLED: &str = "filled";

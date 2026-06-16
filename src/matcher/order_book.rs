@@ -200,6 +200,43 @@ impl OrderBook {
         self.best_price(BookSide::Ask)
     }
 
+    pub fn visible_qty_at(&self, direction: OrderDirection, price: i64) -> i64 {
+        match direction {
+            OrderDirection::Buy => self
+                .bids
+                .get(&price)
+                .map(|level| level.total_qty.max(0))
+                .unwrap_or(0),
+            OrderDirection::Sell => self
+                .asks
+                .get(&price)
+                .map(|level| level.total_qty.max(0))
+                .unwrap_or(0),
+            OrderDirection::Unknown => 0,
+        }
+    }
+
+    pub fn marketable_levels(
+        &self,
+        direction: OrderDirection,
+        limit_price: i64,
+    ) -> Vec<LevelSnapshot> {
+        match direction {
+            OrderDirection::Buy => self
+                .asks
+                .range(..=limit_price)
+                .filter_map(|(&price, level)| self.level_snapshot(price, level))
+                .collect(),
+            OrderDirection::Sell => self
+                .bids
+                .range(limit_price..)
+                .rev()
+                .filter_map(|(&price, level)| self.level_snapshot(price, level))
+                .collect(),
+            OrderDirection::Unknown => Vec::new(),
+        }
+    }
+
     pub fn has_unsettled_holdings(&self) -> bool {
         !self.holding_orders.is_empty()
     }
