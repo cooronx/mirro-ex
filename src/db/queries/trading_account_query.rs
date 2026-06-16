@@ -53,3 +53,55 @@ pub fn query_account_by_user_id(
         )
         .optional()
 }
+
+pub fn freeze_cash(
+    connection: &Connection,
+    user_id: &str,
+    amount: i64,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE accounts
+         SET available_cash = available_cash - ?1,
+             frozen_cash = frozen_cash + ?1,
+             updated_at = ?2
+         WHERE user_id = ?3
+           AND available_cash >= ?1",
+        params![amount, updated_at, user_id],
+    )
+}
+
+pub fn settle_buy_cash(
+    connection: &Connection,
+    user_id: &str,
+    frozen_release: i64,
+    cash_cost: i64,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE accounts
+         SET cash_balance = cash_balance - ?1,
+             frozen_cash = frozen_cash - ?2,
+             available_cash = available_cash + (?2 - ?1),
+             updated_at = ?3
+         WHERE user_id = ?4
+           AND frozen_cash >= ?2",
+        params![cash_cost, frozen_release, updated_at, user_id],
+    )
+}
+
+pub fn settle_sell_cash(
+    connection: &Connection,
+    user_id: &str,
+    proceeds: i64,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE accounts
+         SET cash_balance = cash_balance + ?1,
+             available_cash = available_cash + ?1,
+             updated_at = ?2
+         WHERE user_id = ?3",
+        params![proceeds, updated_at, user_id],
+    )
+}

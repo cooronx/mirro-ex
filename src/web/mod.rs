@@ -20,8 +20,8 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let trading_store = Arc::new(TradingStore::new(trading_db_path));
     let manager = Arc::new(ReplayManager::new(config));
     let router = Router::new()
-        .push(replay::router(manager))
-        .push(trading::router(trading_store));
+        .push(replay::router(manager.clone()))
+        .push(trading::router(trading_store, manager));
 
     info!(host = %host, port = port, "starting salvo web server");
 

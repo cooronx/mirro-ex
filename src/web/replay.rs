@@ -3,7 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use salvo::prelude::*;
 
-use crate::replay_manager::{ReplayManager, ReplayManagerError, ReplayStartRequest};
+use crate::replay_manager::{
+    ReplayManager, ReplayManagerError, ReplaySpeedRequest, ReplayStartRequest,
+};
 
 use super::common::{ApiResponse, parse_json_body, render_api_error};
 
@@ -17,6 +19,10 @@ const REPLAY_INVALID_PAUSE_STATE_CODE: i32 = 1002;
 const REPLAY_INVALID_RESUME_STATE_CODE: i32 = 1003;
 /// 暂停回放时发生错误
 const REPLAY_INVALID_STOP_STATE_CODE: i32 = 1004;
+/// 调整回放速度时发生错误
+const REPLAY_INVALID_SET_SPEED_STATE_CODE: i32 = 1005;
+/// 无效的调整速度请求
+const REPLAY_INVALID_SPEED_REQUEST_CODE: i32 = 1006;
 /// 无效的开始日期
 const REPLAY_INVALID_START_DATE_CODE: i32 = 1101;
 /// 无效的结束日期
@@ -25,6 +31,8 @@ const REPLAY_INVALID_END_DATE_CODE: i32 = 1102;
 const REPLAY_INVALID_START_TIME_CODE: i32 = 1103;
 /// 无效的结束时间
 const REPLAY_INVALID_END_TIME_CODE: i32 = 1104;
+/// 无效的回放速度
+const REPLAY_INVALID_SPEED_CODE: i32 = 1105;
 /// 回放模块的内部错误
 const REPLAY_INTERNAL_COMMAND_CODE: i32 = 1500;
 
@@ -40,6 +48,9 @@ pub fn router(manager: Arc<ReplayManager>) -> Router {
             manager: manager.clone(),
         }))
         .push(Router::with_path("stop").post(StopReplayHandler {
+            manager: manager.clone(),
+        }))
+        .push(Router::with_path("speed").post(SetSpeedHandler {
             manager: manager.clone(),
         }))
         .push(Router::with_path("status").get(GetReplayStatusHandler {
@@ -61,6 +72,10 @@ struct ResumeReplayHandler {
 }
 
 struct StopReplayHandler {
+    manager: Arc<ReplayManager>,
+}
+
+struct SetSpeedHandler {
     manager: Arc<ReplayManager>,
 }
 
@@ -148,6 +163,33 @@ impl Handler for StopReplayHandler {
 }
 
 #[async_trait]
+impl Handler for SetSpeedHandler {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        _depot: &mut Depot,
+        res: &mut Response,
+        _ctrl: &mut FlowCtrl,
+    ) {
+        let Some(request) = parse_json_body::<ReplaySpeedRequest>(
+            req,
+            res,
+            REPLAY_INVALID_SPEED_REQUEST_CODE,
+            "invalid replay speed request",
+        )
+        .await
+        else {
+            return;
+        };
+
+        match self.manager.set_speed(request).await {
+            Ok(status) => res.render(Json(ApiResponse::success(status))),
+            Err(err) => render_manager_error(res, err),
+        }
+    }
+}
+
+#[async_trait]
 impl Handler for GetReplayStatusHandler {
     async fn handle(
         &self,
@@ -181,6 +223,7 @@ fn render_manager_error(res: &mut Response, err: ReplayManagerError) {
         ReplayManagerError::InvalidPauseState(_) => REPLAY_INVALID_PAUSE_STATE_CODE,
         ReplayManagerError::InvalidResumeState(_) => REPLAY_INVALID_RESUME_STATE_CODE,
         ReplayManagerError::InvalidStopState(_) => REPLAY_INVALID_STOP_STATE_CODE,
+        ReplayManagerError::InvalidSetSpeedState(_) => REPLAY_INVALID_SET_SPEED_STATE_CODE,
         ReplayManagerError::MissingCommandChannel | ReplayManagerError::SendCommand => {
             REPLAY_INTERNAL_COMMAND_CODE
         }
@@ -188,6 +231,9 @@ fn render_manager_error(res: &mut Response, err: ReplayManagerError) {
         ReplayManagerError::InvalidReplayEndDate(_) => REPLAY_INVALID_END_DATE_CODE,
         ReplayManagerError::InvalidReplayStartTime(_) => REPLAY_INVALID_START_TIME_CODE,
         ReplayManagerError::InvalidReplayEndTime(_) => REPLAY_INVALID_END_TIME_CODE,
+        ReplayManagerError::NonFiniteReplaySpeed | ReplayManagerError::ReplaySpeedTooSlow => {
+            REPLAY_INVALID_SPEED_CODE
+        }
     };
 
     render_api_error(res, code, err.to_string());

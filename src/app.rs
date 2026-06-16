@@ -12,6 +12,7 @@ use crate::replay::{
     ReplayStatusReporter,
 };
 use crate::replay_manager::ReplayTaskConfig;
+use crate::trading::{TradingStore, trading_db_path_from_config};
 use tokio::sync::mpsc;
 
 struct OrderBookSnapshotHandler {
@@ -26,6 +27,7 @@ impl OrderBookSnapshotHandler {
         snapshot_depth: usize,
         write_snapshot_parquet: bool,
         snapshot_parquet_dir: String,
+        trading_store: TradingStore,
         dispatcher: NatsDispatcher,
     ) -> Result<Self> {
         Ok(Self {
@@ -35,6 +37,7 @@ impl OrderBookSnapshotHandler {
                 snapshot_depth,
                 write_snapshot_parquet,
                 snapshot_parquet_dir,
+                Some(trading_store),
             )?,
             _dispatcher: dispatcher,
         })
@@ -84,6 +87,8 @@ async fn run_internal(
 ) -> Result<ReplayRunReport> {
     let parquet_output_dir = config.replay.snapshot_parquet_dir.clone();
     let write_snapshot_parquet = config.replay.write_snapshot_parquet;
+    let trading_db_path = trading_db_path_from_config(&config.db.schema.trading_db_path)?;
+    let trading_store = TradingStore::new(trading_db_path);
 
     info!(
         write_snapshot_parquet = write_snapshot_parquet,
@@ -131,6 +136,7 @@ async fn run_internal(
         snapshot_depth,
         write_snapshot_parquet,
         parquet_output_dir,
+        trading_store,
         dispatcher,
     )?;
 

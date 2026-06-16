@@ -28,6 +28,11 @@ pub struct ReplayStartRequest {
     pub skip_intraday_breaks: bool,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct ReplaySpeedRequest {
+    pub replay_speed: f64,
+}
+
 #[derive(Debug, Error)]
 pub enum ReplayManagerError {
     #[error("a replay task is already active")]
@@ -38,6 +43,12 @@ pub enum ReplayManagerError {
     InvalidResumeState(ReplayRuntimeState),
     #[error("cannot stop replay while state is {0:?}")]
     InvalidStopState(ReplayRuntimeState),
+    #[error("cannot set replay speed while state is {0:?}")]
+    InvalidSetSpeedState(ReplayRuntimeState),
+    #[error("replay_speed must be finite")]
+    NonFiniteReplaySpeed,
+    #[error("replay_speed must be at least 1.0")]
+    ReplaySpeedTooSlow,
     #[error("missing replay command channel")]
     MissingCommandChannel,
     #[error("failed to send replay command")]
@@ -170,6 +181,7 @@ impl ReplayManager {
         reporter
             .set_status(ReplayStatusSnapshot {
                 state: ReplayRuntimeState::Running,
+                replay_speed: Some(task_config.replay_speed),
                 ..ReplayStatusSnapshot::default()
             })
             .await;
@@ -255,6 +267,33 @@ impl ReplayManager {
         Ok(self.status().await)
     }
 
+    pub async fn set_speed(&self, request: ReplaySpeedRequest) -> Result<ReplayStatusSnapshot> {
+        self.cleanup_finished_task().await;
+        validate_replay_speed(request.replay_speed)?;
+        let state = self.status.read().await.state;
+        if !matches!(
+            state,
+            ReplayRuntimeState::Running | ReplayRuntimeState::Paused
+        ) {
+            return Err(ReplayManagerError::InvalidSetSpeedState(state));
+        }
+        self.send_command(ReplayCommand::SetSpeed(request.replay_speed))
+            .await?;
+
+        {
+            let mut status = self.status.write().await;
+            status.replay_speed = Some(request.replay_speed);
+        }
+        {
+            let mut active_guard = self.active_replay_task.write().await;
+            if let Some(task) = active_guard.as_mut() {
+                task.replay_speed = request.replay_speed;
+            }
+        }
+
+        Ok(self.status().await)
+    }
+
     pub async fn status(&self) -> ReplayStatusSnapshot {
         self.cleanup_finished_task().await;
         self.status.read().await.clone()
@@ -298,6 +337,7 @@ impl ReplayManager {
     }
 
     fn task_config_from_request(&self, request: ReplayStartRequest) -> Result<ReplayTaskConfig> {
+        validate_replay_speed(request.replay_speed)?;
         Ok(ReplayTaskConfig {
             replay_start_date: NaiveDate::parse_from_str(
                 request.replay_start_date.trim(),
@@ -321,6 +361,16 @@ impl ReplayManager {
     }
 }
 
+fn validate_replay_speed(speed: f64) -> Result<()> {
+    if !speed.is_finite() {
+        return Err(ReplayManagerError::NonFiniteReplaySpeed);
+    }
+    if speed < 1.0 {
+        return Err(ReplayManagerError::ReplaySpeedTooSlow);
+    }
+    Ok(())
+}
+
 fn parse_replay_time(raw: &str) -> std::result::Result<NaiveTime, chrono::ParseError> {
     NaiveTime::parse_from_str(raw.trim(), REPLAY_TIME_FORMAT_WITH_MILLISECONDS)
         .or_else(|_| NaiveTime::parse_from_str(raw.trim(), REPLAY_TIME_FORMAT_WITHOUT_MILLISECONDS))
@@ -335,4 +385,27 @@ fn error_chain(err: AnyhowError) -> String {
         source = cause.source();
     }
     chain
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReplayManagerError, validate_replay_speed};
+
+    #[test]
+    fn rejects_invalid_replay_speed() {
+        assert!(matches!(
+            validate_replay_speed(f64::NAN),
+            Err(ReplayManagerError::NonFiniteReplaySpeed)
+        ));
+        assert!(matches!(
+            validate_replay_speed(0.5),
+            Err(ReplayManagerError::ReplaySpeedTooSlow)
+        ));
+    }
+
+    #[test]
+    fn accepts_valid_replay_speed() {
+        validate_replay_speed(1.0).unwrap();
+        validate_replay_speed(10.0).unwrap();
+    }
 }

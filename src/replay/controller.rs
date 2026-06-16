@@ -41,11 +41,12 @@ use super::event::ReplayEvent;
 
 pub type Result<T> = std::result::Result<T, ReplayControllerError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReplayCommand {
     Pause,
     Resume,
     Stop,
+    SetSpeed(f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,6 +65,7 @@ pub struct ReplayStatusSnapshot {
     pub state: ReplayRuntimeState,
     pub sim_now_ms: Option<u64>,
     pub progress: Option<f64>,
+    pub replay_speed: Option<f64>,
     pub current_day: Option<String>,
     pub ticks: usize,
     pub total_events: usize,
@@ -79,6 +81,7 @@ impl Default for ReplayStatusSnapshot {
             state: ReplayRuntimeState::Idle,
             sim_now_ms: None,
             progress: None,
+            replay_speed: None,
             current_day: None,
             ticks: 0,
             total_events: 0,
@@ -117,11 +120,13 @@ impl ReplayStatusReporter {
         total_events: usize,
         max_lag_ms: u64,
         final_lag_ms: u64,
+        replay_speed: f64,
     ) {
         let mut guard = self.status.write().await;
         guard.state = ReplayRuntimeState::Running;
         guard.sim_now_ms = Some(sim_now_ms);
         guard.progress = Some(progress);
+        guard.replay_speed = Some(replay_speed);
         guard.current_day = Some(current_day);
         guard.ticks = ticks;
         guard.total_events = total_events;
@@ -139,11 +144,13 @@ impl ReplayStatusReporter {
         total_events: usize,
         max_lag_ms: u64,
         final_lag_ms: Option<u64>,
+        replay_speed: f64,
     ) {
         let mut guard = self.status.write().await;
         guard.state = ReplayRuntimeState::Paused;
         guard.sim_now_ms = Some(sim_now_ms);
         guard.progress = Some(progress);
+        guard.replay_speed = Some(replay_speed);
         guard.current_day = Some(current_day);
         guard.ticks = ticks;
         guard.total_events = total_events;
@@ -160,11 +167,13 @@ impl ReplayStatusReporter {
         total_events: usize,
         max_lag_ms: u64,
         final_lag_ms: Option<u64>,
+        replay_speed: f64,
     ) {
         let mut guard = self.status.write().await;
         guard.state = ReplayRuntimeState::Stopping;
         guard.sim_now_ms = Some(sim_now_ms);
         guard.progress = Some(progress);
+        guard.replay_speed = Some(replay_speed);
         guard.current_day = Some(current_day);
         guard.ticks = ticks;
         guard.total_events = total_events;
@@ -540,6 +549,7 @@ impl ReplayController {
         let mut total_lag_ms = 0u128;
         let mut final_lag_ms = None;
         let mut stopped = false;
+        let mut replay_speed = self.replay_task_config.replay_speed;
         loop {
             if let Some(control) = control.as_mut() {
                 if self
@@ -551,6 +561,7 @@ impl ReplayController {
                         total_events,
                         max_lag_ms,
                         final_lag_ms,
+                        &mut replay_speed,
                     )
                     .await?
                 {
@@ -578,6 +589,7 @@ impl ReplayController {
                         total_events + result.events.len(),
                         max_lag_ms,
                         result.lag_ms,
+                        replay_speed,
                     )
                     .await;
             }
@@ -638,6 +650,7 @@ impl ReplayController {
         total_events: usize,
         max_lag_ms: u64,
         final_lag_ms: Option<u64>,
+        replay_speed: &mut f64,
     ) -> Result<bool> {
         while let Ok(command) = control.command_rx.try_recv() {
             match command {
@@ -655,6 +668,7 @@ impl ReplayController {
                             total_events,
                             max_lag_ms,
                             final_lag_ms,
+                            *replay_speed,
                         )
                         .await;
 
@@ -674,9 +688,29 @@ impl ReplayController {
                                         total_events,
                                         max_lag_ms,
                                         final_lag_ms.unwrap_or(0),
+                                        *replay_speed,
                                     )
                                     .await;
                                 break;
+                            }
+                            Some(ReplayCommand::SetSpeed(speed)) => {
+                                coordinator.set_clock_speed(speed)?;
+                                *replay_speed = speed;
+                                let sim_now_ms = coordinator.current_sim_now()?;
+                                let progress = coordinator.progress()?;
+                                control
+                                    .status_reporter
+                                    .mark_paused(
+                                        current_day.to_string(),
+                                        sim_now_ms,
+                                        progress,
+                                        tick_count,
+                                        total_events,
+                                        max_lag_ms,
+                                        final_lag_ms,
+                                        *replay_speed,
+                                    )
+                                    .await;
                             }
                             Some(ReplayCommand::Stop) | None => {
                                 let sim_now_ms = coordinator.current_sim_now()?;
@@ -691,6 +725,7 @@ impl ReplayController {
                                         total_events,
                                         max_lag_ms,
                                         final_lag_ms,
+                                        *replay_speed,
                                     )
                                     .await;
                                 return Ok(true);
@@ -700,6 +735,25 @@ impl ReplayController {
                     }
                 }
                 ReplayCommand::Resume => {}
+                ReplayCommand::SetSpeed(speed) => {
+                    coordinator.set_clock_speed(speed)?;
+                    *replay_speed = speed;
+                    let sim_now_ms = coordinator.current_sim_now()?;
+                    let progress = coordinator.progress()?;
+                    control
+                        .status_reporter
+                        .update_running(
+                            current_day.to_string(),
+                            sim_now_ms,
+                            progress,
+                            tick_count,
+                            total_events,
+                            max_lag_ms,
+                            final_lag_ms.unwrap_or(0),
+                            *replay_speed,
+                        )
+                        .await;
+                }
                 ReplayCommand::Stop => {
                     let sim_now_ms = coordinator.current_sim_now()?;
                     let progress = coordinator.progress()?;
@@ -713,6 +767,7 @@ impl ReplayController {
                             total_events,
                             max_lag_ms,
                             final_lag_ms,
+                            *replay_speed,
                         )
                         .await;
                     return Ok(true);

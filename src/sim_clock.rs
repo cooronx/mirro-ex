@@ -130,6 +130,14 @@ impl SimClock {
         self.resume_impl(Instant::now())
     }
 
+    /// 调整模拟时间推进倍率。
+    ///
+    /// 如果时钟正在运行，会先按旧倍率结算到当前模拟时间，再从该点用新倍率继续推进。
+    /// 如果时钟处于暂停或就绪状态，只更新倍率，后续启动/恢复时生效。
+    pub fn set_speed(&mut self, speed: f64) -> Result<()> {
+        self.set_speed_impl(speed, Instant::now())
+    }
+
     /// 返回当前模拟时间对应的 Unix 毫秒时间戳。
     ///
     /// 当时钟处于：
@@ -212,6 +220,17 @@ impl SimClock {
             SimClockState::Running => Err(SimClockError::AlreadyRunning),
             SimClockState::Finished => Err(SimClockError::AlreadyFinished),
         }
+    }
+
+    fn set_speed_impl(&mut self, speed: f64, now_real: Instant) -> Result<()> {
+        validate_speed(speed)?;
+        if self.state == SimClockState::Running {
+            let sim_ms = self.now_at(now_real)?;
+            self.sim_anchor_ms = sim_ms;
+            self.real_anchor_time = Some(now_real);
+        }
+        self.speed = speed;
+        Ok(())
     }
 
     fn now_at(&mut self, now_real: Instant) -> Result<u64> {
@@ -516,6 +535,27 @@ mod tests {
 
         assert_eq!(after_resume - clock.sim_start_ms(), 10_000);
         assert_eq!(clock.state(), SimClockState::Running);
+    }
+
+    #[test]
+    fn set_speed_while_running_keeps_sim_time_continuous() {
+        let real_start = Instant::now();
+        let mut clock = SimClock::new(1_000, 61_000, 2.0, false).unwrap();
+
+        clock.start_impl(real_start).unwrap();
+        assert_eq!(
+            clock.now_at(real_start + Duration::from_secs(3)).unwrap(),
+            7_000
+        );
+        clock
+            .set_speed_impl(4.0, real_start + Duration::from_secs(3))
+            .unwrap();
+
+        assert_eq!(
+            clock.now_at(real_start + Duration::from_secs(5)).unwrap(),
+            15_000
+        );
+        assert_eq!(clock.speed(), 4.0);
     }
 
     #[test]

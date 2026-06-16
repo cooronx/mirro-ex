@@ -166,6 +166,11 @@ impl ReplayCoordinator {
         Ok(())
     }
 
+    pub fn set_clock_speed(&mut self, speed: f64) -> Result<()> {
+        self.clock.set_speed(speed)?;
+        Ok(())
+    }
+
     pub fn current_sim_now(&mut self) -> Result<u64> {
         Ok(self.clock.now()?)
     }

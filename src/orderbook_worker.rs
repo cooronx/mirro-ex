@@ -22,6 +22,7 @@ use crate::common::{L2Order, Market, OrderType};
 use crate::matcher::order_book::OrderBook;
 use crate::replay::ReplayEvent;
 use crate::snapshot_exporter::SnapshotParquetExporter;
+use crate::trading::TradingStore;
 
 type WorkerReply = oneshot::Sender<Result<()>>;
 
@@ -66,6 +67,7 @@ struct WorkerState {
     snapshot_depth: usize,
     write_snapshot_parquet: bool,
     snapshot_parquet_dir: PathBuf,
+    trading_store: Option<TradingStore>,
     current_day: Option<String>,
     codes: HashMap<String, CodeState>,
 }
@@ -121,16 +123,22 @@ impl WorkerState {
         }
 
         if !state.book.has_unsettled_holdings() {
-            self.record_snapshot(&code, timestamp_ms)?;
+            let snapshot = self.current_snapshot(&code, timestamp_ms)?;
+            self.record_snapshot(&code, timestamp_ms, &snapshot)?;
+            if let Some(trading_store) = &self.trading_store {
+                trading_store
+                    .match_limit_orders(&code, &snapshot, timestamp_ms)
+                    .with_context(|| format!("failed to match simulated orders for code={code}"))?;
+            }
         }
         Ok(())
     }
 
-    fn record_snapshot(&mut self, code: &str, timestamp_ms: i64) -> Result<()> {
-        let day = self
-            .current_day
-            .as_deref()
-            .context("worker received events before replay day started")?;
+    fn current_snapshot(
+        &mut self,
+        code: &str,
+        timestamp_ms: i64,
+    ) -> Result<crate::matcher::order_book::OrderBookSnapshot> {
         let state = self
             .codes
             .get_mut(code)
@@ -140,8 +148,25 @@ impl WorkerState {
         } else {
             state.book.snapshot(self.snapshot_depth)
         };
+        Ok(snapshot)
+    }
+
+    fn record_snapshot(
+        &mut self,
+        code: &str,
+        timestamp_ms: i64,
+        snapshot: &crate::matcher::order_book::OrderBookSnapshot,
+    ) -> Result<()> {
+        let day = self
+            .current_day
+            .as_deref()
+            .context("worker received events before replay day started")?;
 
         if self.write_snapshot_parquet {
+            let state = self
+                .codes
+                .get_mut(code)
+                .context("missing order book state for snapshot")?;
             if state.exporter.is_none() {
                 let mut exporter = SnapshotParquetExporter::new(&self.snapshot_parquet_dir);
                 exporter
@@ -153,7 +178,7 @@ impl WorkerState {
                 .exporter
                 .as_mut()
                 .expect("exporter was initialized")
-                .write_snapshot(timestamp_ms, code, &snapshot)
+                .write_snapshot(timestamp_ms, code, snapshot)
                 .with_context(|| {
                     format!(
                         "failed to write order book snapshot for code={code} worker={}",
@@ -181,7 +206,15 @@ impl WorkerState {
 
             if changed {
                 if let Some(timestamp_ms) = timestamp_ms {
-                    self.record_snapshot(&code, timestamp_ms)?;
+                    let snapshot = self.current_snapshot(&code, timestamp_ms)?;
+                    self.record_snapshot(&code, timestamp_ms, &snapshot)?;
+                    if let Some(trading_store) = &self.trading_store {
+                        trading_store
+                            .match_limit_orders(&code, &snapshot, timestamp_ms)
+                            .with_context(|| {
+                                format!("failed to match simulated orders for code={code}")
+                            })?;
+                    }
                 }
             }
 
@@ -212,6 +245,7 @@ impl OrderBookWorkerPool {
         snapshot_depth: usize,
         write_snapshot_parquet: bool,
         snapshot_parquet_dir: impl Into<PathBuf>,
+        trading_store: Option<TradingStore>,
     ) -> Result<Self> {
         if worker_count == 0 {
             bail!("orderbook_workers must be greater than zero");
@@ -226,6 +260,7 @@ impl OrderBookWorkerPool {
                 snapshot_depth,
                 write_snapshot_parquet,
                 snapshot_parquet_dir: snapshot_parquet_dir.clone(),
+                trading_store: trading_store.clone(),
                 current_day: None,
                 codes: HashMap::new(),
             };
