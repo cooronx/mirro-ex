@@ -135,10 +135,8 @@ impl WorkerState {
             .codes
             .get_mut(code)
             .context("missing order book state for snapshot")?;
-        let snapshot = if is_closing_call_auction_time(timestamp_ms) {
-            state
-                .book
-                .closing_call_auction_snapshot(self.snapshot_depth)
+        let snapshot = if is_call_auction_time(timestamp_ms) {
+            state.book.call_auction_snapshot(self.snapshot_depth)
         } else {
             state.book.snapshot(self.snapshot_depth)
         };
@@ -389,19 +387,22 @@ fn stable_worker_index(code: &str, worker_count: usize) -> usize {
     (hash % worker_count as u64) as usize
 }
 
-fn is_closing_call_auction_time(timestamp_ms: i64) -> bool {
+fn is_call_auction_time(timestamp_ms: i64) -> bool {
     const SHANGHAI_OFFSET_MS: i64 = 8 * 60 * 60 * 1_000;
     const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
-    const START_MS: i64 = (14 * 60 * 60 + 57 * 60) * 1_000;
-    const END_MS: i64 = 15 * 60 * 60 * 1_000;
+    const OPENING_START_MS: i64 = (9 * 60 * 60 + 15 * 60) * 1_000;
+    const OPENING_END_MS: i64 = (9 * 60 * 60 + 25 * 60) * 1_000;
+    const CLOSING_START_MS: i64 = (14 * 60 * 60 + 57 * 60) * 1_000;
+    const CLOSING_END_MS: i64 = 15 * 60 * 60 * 1_000;
 
     let local_ms = (timestamp_ms + SHANGHAI_OFFSET_MS).rem_euclid(DAY_MS);
-    (START_MS..END_MS).contains(&local_ms)
+    (OPENING_START_MS..OPENING_END_MS).contains(&local_ms)
+        || (CLOSING_START_MS..CLOSING_END_MS).contains(&local_ms)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_closing_call_auction_time, stable_worker_index};
+    use super::{is_call_auction_time, stable_worker_index};
 
     #[test]
     fn stable_hash_routes_same_code_to_same_worker() {
@@ -410,10 +411,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_closing_call_auction_time() {
-        assert!(!is_closing_call_auction_time(1_778_741_819_999));
-        assert!(is_closing_call_auction_time(1_778_741_820_000));
-        assert!(is_closing_call_auction_time(1_778_741_999_999));
-        assert!(!is_closing_call_auction_time(1_778_742_000_000));
+    fn detects_call_auction_time() {
+        assert!(!is_call_auction_time(1_778_721_299_999));
+        assert!(is_call_auction_time(1_778_721_300_000));
+        assert!(is_call_auction_time(1_778_721_899_999));
+        assert!(!is_call_auction_time(1_778_721_900_000));
+
+        assert!(!is_call_auction_time(1_778_741_819_999));
+        assert!(is_call_auction_time(1_778_741_820_000));
+        assert!(is_call_auction_time(1_778_741_999_999));
+        assert!(!is_call_auction_time(1_778_742_000_000));
     }
 }

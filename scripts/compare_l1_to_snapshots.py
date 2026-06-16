@@ -14,6 +14,10 @@ import pyarrow.parquet as parquet
 DEPTH = 5
 SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
 DAY_MS = 24 * 60 * 60 * 1000
+OPENING_AUCTION_START_MS = (9 * 60 * 60 + 15 * 60) * 1000
+OPENING_AUCTION_END_MS = (9 * 60 * 60 + 25 * 60) * 1000
+PRE_CONTINUOUS_START_MS = OPENING_AUCTION_END_MS
+PRE_CONTINUOUS_END_MS = (9 * 60 * 60 + 30 * 60) * 1000
 CLOSING_AUCTION_START_MS = (14 * 60 * 60 + 57 * 60) * 1000
 CLOSING_AUCTION_END_MS = 15 * 60 * 60 * 1000
 
@@ -98,18 +102,37 @@ def normalize_level(
     price: object,
     size: object,
 ) -> tuple[float | None, int | None]:
-    if price is None or size is None:
+    if price is None and size is None:
         return None, None
-    return round(float(price), 4), int(size)
+
+    normalized_price = None if price is None else round(float(price), 4)
+    normalized_size = None if size is None else int(size)
+    if normalized_price in (None, 0) and normalized_size in (None, 0):
+        return None, None
+    if normalized_price is None or normalized_size is None:
+        return None, None
+    return normalized_price, normalized_size
 
 
-def is_closing_call_auction_time(ts: int) -> bool:
-    local_ms = (ts + SHANGHAI_OFFSET_MS) % DAY_MS
-    return CLOSING_AUCTION_START_MS <= local_ms < CLOSING_AUCTION_END_MS
+def local_ms_of_day(ts: int) -> int:
+    return (ts + SHANGHAI_OFFSET_MS) % DAY_MS
+
+
+def is_call_auction_time(ts: int) -> bool:
+    local_ms = local_ms_of_day(ts)
+    return (
+        OPENING_AUCTION_START_MS <= local_ms < OPENING_AUCTION_END_MS
+        or CLOSING_AUCTION_START_MS <= local_ms < CLOSING_AUCTION_END_MS
+    )
+
+
+def should_skip_row(ts: int) -> bool:
+    local_ms = local_ms_of_day(ts)
+    return PRE_CONTINUOUS_START_MS <= local_ms < PRE_CONTINUOUS_END_MS
 
 
 def comparison_depth(ts: int) -> int:
-    if is_closing_call_auction_time(ts):
+    if is_call_auction_time(ts):
         return 1
     return DEPTH
 
@@ -230,9 +253,14 @@ def main() -> int:
     snapshot_times = [row.ts for row in snapshots]
     exact_matches = 0
     no_candidates = 0
+    skipped_rows = 0
     mismatches: list[dict[str, object]] = []
 
     for l1_row in l1_rows:
+        if should_skip_row(l1_row.ts):
+            skipped_rows += 1
+            continue
+
         result = best_snapshot(
             l1_row,
             snapshots,
@@ -253,12 +281,16 @@ def main() -> int:
 
     print(f"code={l1_code}")
     print(f"total_l1_rows={len(l1_rows)}")
+    print(f"skipped_rows={skipped_rows}")
+    compared_rows = len(l1_rows) - skipped_rows
+    print(f"compared_rows={compared_rows}")
     print(f"l1_time_range={l1_rows[0].ts}..{l1_rows[-1].ts}")
     print(f"snapshot_time_range={snapshots[0].ts}..{snapshots[-1].ts}")
     print(f"exact_match_rows={exact_matches}")
     print(f"mismatch_rows={len(mismatches)}")
     print(f"no_snapshot_in_window={no_candidates}")
-    print(f"match_rate={exact_matches / len(l1_rows):.2%}")
+    match_rate = exact_matches / compared_rows if compared_rows else 0
+    print(f"match_rate={match_rate:.2%}")
 
     if args.mismatch_output:
         write_mismatches(args.mismatch_output, mismatches)

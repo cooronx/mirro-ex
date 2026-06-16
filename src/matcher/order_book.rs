@@ -172,7 +172,7 @@ impl OrderBook {
         OrderBookSnapshot { bids, asks }
     }
 
-    pub fn closing_call_auction_snapshot(&self, depth: usize) -> OrderBookSnapshot {
+    pub fn call_auction_snapshot(&self, depth: usize) -> OrderBookSnapshot {
         if depth == 0 {
             return OrderBookSnapshot::default();
         }
@@ -1073,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_call_auction_snapshot_uses_max_executable_quantity() {
+    fn call_auction_snapshot_uses_max_executable_quantity() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 101_000, 10))
@@ -1087,7 +1087,7 @@ mod tests {
         book.apply_order(limit_order(5, OrderDirection::Sell, 101_000, 10))
             .unwrap();
 
-        let snapshot = book.closing_call_auction_snapshot(10);
+        let snapshot = book.call_auction_snapshot(10);
 
         assert_eq!(snapshot.bids[0].price, 100_000);
         assert_eq!(snapshot.asks[0].price, 100_000);
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_call_auction_snapshot_uses_last_trade_price_for_tie() {
+    fn call_auction_snapshot_uses_last_trade_price_for_tie() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 101_000, 10))
@@ -1114,7 +1114,7 @@ mod tests {
         trade.price = 101_000;
         book.apply_transaction(trade).unwrap();
 
-        let snapshot = book.closing_call_auction_snapshot(10);
+        let snapshot = book.call_auction_snapshot(10);
 
         assert_eq!(snapshot.bids[0].price, 101_000);
         assert_eq!(snapshot.asks[0].price, 101_000);
@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_call_auction_snapshot_is_empty_without_crossed_book() {
+    fn call_auction_snapshot_is_empty_without_crossed_book() {
         let mut book = OrderBook::new();
 
         book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
@@ -1130,7 +1130,7 @@ mod tests {
         book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 10))
             .unwrap();
 
-        let snapshot = book.closing_call_auction_snapshot(10);
+        let snapshot = book.call_auction_snapshot(10);
 
         assert!(snapshot.bids.is_empty());
         assert!(snapshot.asks.is_empty());
