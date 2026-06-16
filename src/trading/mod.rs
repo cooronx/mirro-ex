@@ -2,9 +2,11 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::db::queries::trading_account_query::{insert_account, query_account_by_user_id};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Account {
@@ -86,25 +88,8 @@ impl TradingStore {
         };
 
         let connection = self.open_connection()?;
-        match connection.execute(
-            "INSERT INTO accounts (
-                user_id,
-                cash_balance,
-                available_cash,
-                frozen_cash,
-                created_at,
-                updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                account.user_id,
-                account.cash_balance,
-                account.available_cash,
-                account.frozen_cash,
-                account.created_at,
-                account.updated_at,
-            ],
-        ) {
-            Ok(_) => Ok(account),
+        match insert_account(&connection, &account) {
+            Ok(()) => Ok(account),
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
@@ -120,34 +105,12 @@ impl TradingStore {
         }
 
         let connection = self.open_connection()?;
-        let account = connection
-            .query_row(
-                "SELECT
-                    user_id,
-                    cash_balance,
-                    available_cash,
-                    frozen_cash,
-                    created_at,
-                    updated_at
-                 FROM accounts
-                 WHERE user_id = ?1",
-                params![user_id],
-                |row| {
-                    Ok(Account {
-                        user_id: row.get(0)?,
-                        cash_balance: row.get(1)?,
-                        available_cash: row.get(2)?,
-                        frozen_cash: row.get(3)?,
-                        created_at: row.get(4)?,
-                        updated_at: row.get(5)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|source| TradingStoreError::QueryAccount {
+        let account = query_account_by_user_id(&connection, user_id).map_err(|source| {
+            TradingStoreError::QueryAccount {
                 user_id: user_id.to_string(),
                 source,
-            })?;
+            }
+        })?;
 
         account.ok_or_else(|| TradingStoreError::AccountNotFound {
             user_id: user_id.to_string(),
