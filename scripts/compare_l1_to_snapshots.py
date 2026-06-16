@@ -12,6 +12,10 @@ import pyarrow.parquet as parquet
 
 
 DEPTH = 5
+SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
+DAY_MS = 24 * 60 * 60 * 1000
+CLOSING_AUCTION_START_MS = (14 * 60 * 60 + 57 * 60) * 1000
+CLOSING_AUCTION_END_MS = 15 * 60 * 60 * 1000
 
 
 @dataclass
@@ -99,18 +103,30 @@ def normalize_level(
     return round(float(price), 4), int(size)
 
 
+def is_closing_call_auction_time(ts: int) -> bool:
+    local_ms = (ts + SHANGHAI_OFFSET_MS) % DAY_MS
+    return CLOSING_AUCTION_START_MS <= local_ms < CLOSING_AUCTION_END_MS
+
+
+def comparison_depth(ts: int) -> int:
+    if is_closing_call_auction_time(ts):
+        return 1
+    return DEPTH
+
+
 def mismatch_count(left: BookRow, right: BookRow) -> int:
     return len(find_differences(left, right))
 
 
 def find_differences(left: BookRow, right: BookRow) -> list[str]:
     differences = []
+    depth = comparison_depth(left.ts)
     for side, left_levels, right_levels in (
         ("bid", left.bids, right.bids),
         ("ask", left.asks, right.asks),
     ):
         for index, (left_level, right_level) in enumerate(
-            zip(left_levels, right_levels),
+            zip(left_levels[:depth], right_levels[:depth]),
             start=1,
         ):
             if left_level[0] != right_level[0]:
@@ -149,6 +165,7 @@ def write_mismatches(path: Path, rows: list[dict[str, object]]) -> None:
         "l1_ts",
         "snapshot_ts",
         "delta_ms",
+        "comparison_depth",
         "mismatch_count",
         "mismatch_fields",
     ]
@@ -177,6 +194,7 @@ def mismatch_row(
         "l1_ts": l1_row.ts,
         "snapshot_ts": snapshot.ts if snapshot else "",
         "delta_ms": snapshot.ts - l1_row.ts if snapshot else "",
+        "comparison_depth": comparison_depth(l1_row.ts),
         "mismatch_count": len(differences) if snapshot else "",
         "mismatch_fields": ",".join(differences) if snapshot else "no_snapshot_in_window",
     }

@@ -776,7 +776,7 @@ fn split_request_into_daily_windows(request: &ReplayTaskConfig) -> Vec<DailyRepl
         windows.push(DailyReplayWindow {
             day: day.format("%Y-%m-%d").to_string(),
             start_time_ms: timestamp_ms_for_local_datetime(day, request.replay_start_time),
-            end_time_ms: timestamp_ms_for_local_datetime(day, request.replay_end_time),
+            end_time_ms: exclusive_end_time_ms(day, request.replay_end_time),
         });
 
         if day == request.replay_end_date {
@@ -797,6 +797,13 @@ fn timestamp_ms_for_local_datetime(day: NaiveDate, time: NaiveTime) -> i64 {
         .single()
         .expect("local replay datetime in Asia/Shanghai should be unambiguous")
         .timestamp_millis()
+}
+
+fn exclusive_end_time_ms(day: NaiveDate, time: NaiveTime) -> i64 {
+    // 这里多加1毫秒，这样的话用户传入的区间就可以被包含完全了
+    timestamp_ms_for_local_datetime(day, time)
+        .checked_add(1)
+        .expect("exclusive replay end timestamp should not overflow")
 }
 
 #[cfg(test)]
@@ -836,12 +843,12 @@ mod tests {
                 DailyReplayWindow {
                     day: "2026-05-12".to_string(),
                     start_time_ms: 1_778_549_400_000,
-                    end_time_ms: 1_778_569_200_000,
+                    end_time_ms: 1_778_569_200_001,
                 },
                 DailyReplayWindow {
                     day: "2026-05-13".to_string(),
                     start_time_ms: 1_778_635_800_000,
-                    end_time_ms: 1_778_655_600_000,
+                    end_time_ms: 1_778_655_600_001,
                 },
             ]
         );

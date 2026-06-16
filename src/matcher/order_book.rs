@@ -68,6 +68,7 @@ pub struct OrderBook {
     holding_orders: HashMap<OrderId, HoldingOrder>,
     pending_cancels: HashMap<OrderId, i64>,
     pending_reductions: HashMap<OrderId, i64>,
+    last_trade_price: Option<i64>,
 }
 
 impl OrderBook {
@@ -107,6 +108,7 @@ impl OrderBook {
         match transaction.market {
             Market::XSHG => match transaction.deal_type.trim() {
                 "B" | "S" | "N" => {
+                    self.record_trade_price(transaction.price);
                     if transaction.buy_number > 0 {
                         self.reduce_visible_order(transaction.buy_number, transaction.volume);
                     }
@@ -125,6 +127,7 @@ impl OrderBook {
                     self.cancel_transaction_orders(&transaction);
                 }
                 "F" => {
+                    self.record_trade_price(transaction.price);
                     self.process_shenzhen_trade(&transaction);
                 }
                 _ => {
@@ -134,6 +137,7 @@ impl OrderBook {
                 }
             },
             Market::Unknown => {
+                self.record_trade_price(transaction.price);
                 if transaction.buy_number > 0 {
                     self.reduce_order(transaction.buy_number, transaction.volume);
                 }
@@ -166,6 +170,26 @@ impl OrderBook {
             .collect();
 
         OrderBookSnapshot { bids, asks }
+    }
+
+    pub fn closing_call_auction_snapshot(&self, depth: usize) -> OrderBookSnapshot {
+        if depth == 0 {
+            return OrderBookSnapshot::default();
+        }
+
+        let Some(result) = self.call_auction_result() else {
+            return OrderBookSnapshot::default();
+        };
+
+        let level = LevelSnapshot {
+            price: result.price,
+            total_qty: result.executable_qty,
+            order_count: 0,
+        };
+        OrderBookSnapshot {
+            bids: vec![level.clone()],
+            asks: vec![level],
+        }
     }
 
     pub fn best_bid_price(&mut self) -> Option<i64> {
@@ -445,6 +469,80 @@ impl OrderBook {
         self.order_hash.contains_key(&order_id) || self.holding_orders.contains_key(&order_id)
     }
 
+    fn record_trade_price(&mut self, price: i64) {
+        if price > 0 {
+            self.last_trade_price = Some(price);
+        }
+    }
+
+    fn call_auction_result(&self) -> Option<CallAuctionResult> {
+        let mut best = Vec::new();
+        for price in self.candidate_auction_prices() {
+            let bid_qty = self.bid_qty_at_or_above(price);
+            let ask_qty = self.ask_qty_at_or_below(price);
+            let executable_qty = bid_qty.min(ask_qty);
+            if executable_qty <= 0 {
+                continue;
+            }
+
+            let result = CallAuctionResult {
+                price,
+                executable_qty,
+                remaining_qty: bid_qty.abs_diff(ask_qty),
+            };
+            match best.first() {
+                None => best.push(result),
+                Some(current) if result.is_better_primary_than(current) => {
+                    best.clear();
+                    best.push(result);
+                }
+                Some(current) if result.has_same_primary_score(current) => best.push(result),
+                _ => {}
+            }
+        }
+
+        if best.is_empty() {
+            return None;
+        }
+        if best.len() == 1 {
+            return best.into_iter().next();
+        }
+
+        if let Some(last_trade_price) = self.last_trade_price {
+            best.into_iter()
+                .min_by_key(|result| (result.price.abs_diff(last_trade_price), result.price))
+        } else {
+            best.sort_by_key(|result| result.price);
+            best.get((best.len() - 1) / 2).copied()
+        }
+    }
+
+    fn candidate_auction_prices(&self) -> Vec<i64> {
+        let mut prices = self
+            .bids
+            .iter()
+            .chain(self.asks.iter())
+            .filter_map(|(&price, level)| (!Self::level_is_empty(level)).then_some(price))
+            .collect::<Vec<_>>();
+        prices.sort_unstable();
+        prices.dedup();
+        prices
+    }
+
+    fn bid_qty_at_or_above(&self, price: i64) -> i64 {
+        self.bids
+            .range(price..)
+            .map(|(_, level)| level.total_qty.max(0))
+            .sum()
+    }
+
+    fn ask_qty_at_or_below(&self, price: i64) -> i64 {
+        self.asks
+            .range(..=price)
+            .map(|(_, level)| level.total_qty.max(0))
+            .sum()
+    }
+
     fn best_own_price(&mut self, direction: OrderDirection) -> Result<Option<i64>> {
         match direction {
             OrderDirection::Buy => Ok(self.best_bid_price()),
@@ -564,6 +662,25 @@ impl OrderBook {
             order_ids.push(transaction.sell_number);
         }
         order_ids
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CallAuctionResult {
+    price: i64,
+    executable_qty: i64,
+    remaining_qty: u64,
+}
+
+impl CallAuctionResult {
+    fn is_better_primary_than(&self, other: &Self) -> bool {
+        self.executable_qty > other.executable_qty
+            || (self.executable_qty == other.executable_qty
+                && self.remaining_qty < other.remaining_qty)
+    }
+
+    fn has_same_primary_score(&self, other: &Self) -> bool {
+        self.executable_qty == other.executable_qty && self.remaining_qty == other.remaining_qty
     }
 }
 
@@ -953,5 +1070,69 @@ mod tests {
         assert_eq!(snapshot.bids[0].total_qty, 13);
         assert_eq!(snapshot.bids[1].price, 100_000);
         assert_eq!(snapshot.bids[1].total_qty, 10);
+    }
+
+    #[test]
+    fn closing_call_auction_snapshot_uses_max_executable_quantity() {
+        let mut book = OrderBook::new();
+
+        book.apply_order(limit_order(1, OrderDirection::Buy, 101_000, 10))
+            .unwrap();
+        book.apply_order(limit_order(2, OrderDirection::Buy, 100_000, 20))
+            .unwrap();
+        book.apply_order(limit_order(3, OrderDirection::Sell, 99_000, 5))
+            .unwrap();
+        book.apply_order(limit_order(4, OrderDirection::Sell, 100_000, 20))
+            .unwrap();
+        book.apply_order(limit_order(5, OrderDirection::Sell, 101_000, 10))
+            .unwrap();
+
+        let snapshot = book.closing_call_auction_snapshot(10);
+
+        assert_eq!(snapshot.bids[0].price, 100_000);
+        assert_eq!(snapshot.asks[0].price, 100_000);
+        assert_eq!(snapshot.bids[0].total_qty, 25);
+        assert_eq!(snapshot.asks[0].total_qty, 25);
+        assert_eq!(snapshot.bids.len(), 1);
+        assert_eq!(snapshot.asks.len(), 1);
+    }
+
+    #[test]
+    fn closing_call_auction_snapshot_uses_last_trade_price_for_tie() {
+        let mut book = OrderBook::new();
+
+        book.apply_order(limit_order(1, OrderDirection::Buy, 101_000, 10))
+            .unwrap();
+        book.apply_order(limit_order(2, OrderDirection::Buy, 100_000, 10))
+            .unwrap();
+        book.apply_order(limit_order(3, OrderDirection::Sell, 100_000, 10))
+            .unwrap();
+        book.apply_order(limit_order(4, OrderDirection::Sell, 101_000, 10))
+            .unwrap();
+
+        let mut trade = xshg_transaction(0, 0, 1, "N");
+        trade.price = 101_000;
+        book.apply_transaction(trade).unwrap();
+
+        let snapshot = book.closing_call_auction_snapshot(10);
+
+        assert_eq!(snapshot.bids[0].price, 101_000);
+        assert_eq!(snapshot.asks[0].price, 101_000);
+        assert_eq!(snapshot.bids[0].total_qty, 10);
+    }
+
+    #[test]
+    fn closing_call_auction_snapshot_is_empty_without_crossed_book() {
+        let mut book = OrderBook::new();
+
+        book.apply_order(limit_order(1, OrderDirection::Buy, 100_000, 10))
+            .unwrap();
+        book.apply_order(limit_order(2, OrderDirection::Sell, 101_000, 10))
+            .unwrap();
+
+        let snapshot = book.closing_call_auction_snapshot(10);
+
+        assert!(snapshot.bids.is_empty());
+        assert!(snapshot.asks.is_empty());
     }
 }
