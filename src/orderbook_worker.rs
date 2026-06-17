@@ -19,6 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::oneshot;
 
 use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
+use crate::market::MarketState;
 use crate::matcher::order_book::OrderBook;
 use crate::replay::ReplayEvent;
 use crate::snapshot_exporter::SnapshotParquetExporter;
@@ -70,6 +71,7 @@ struct WorkerState {
     write_snapshot_parquet: bool,
     snapshot_parquet_dir: PathBuf,
     trading_store: Option<TradingStore>,
+    market_state: MarketState,
     current_day: Option<String>,
     codes: HashMap<String, CodeState>,
 }
@@ -131,6 +133,7 @@ impl WorkerState {
         if !state.book.has_unsettled_holdings() {
             let snapshot = self.current_snapshot(&code, timestamp_ms)?;
             self.record_snapshot(&code, timestamp_ms, &snapshot)?;
+            self.record_market_snapshot(&code, timestamp_ms, &snapshot);
             self.initialize_simulated_orders(&code, timestamp_ms)?;
             if let Some(transaction) = transaction_for_matching {
                 self.match_simulated_orders_from_transaction(&code, &transaction, timestamp_ms)?;
@@ -192,6 +195,20 @@ impl WorkerState {
                 })?;
         }
         Ok(())
+    }
+
+    fn record_market_snapshot(
+        &self,
+        code: &str,
+        timestamp_ms: i64,
+        snapshot: &crate::matcher::order_book::OrderBookSnapshot,
+    ) {
+        let Some(state) = self.codes.get(code) else {
+            return;
+        };
+        let last_price = state.book.last_trade_price();
+        self.market_state
+            .update(code, timestamp_ms, last_price, snapshot);
     }
 
     fn initialize_simulated_orders(&mut self, code: &str, timestamp_ms: i64) -> Result<()> {
@@ -296,6 +313,7 @@ impl WorkerState {
                 if let Some(timestamp_ms) = timestamp_ms {
                     let snapshot = self.current_snapshot(&code, timestamp_ms)?;
                     self.record_snapshot(&code, timestamp_ms, &snapshot)?;
+                    self.record_market_snapshot(&code, timestamp_ms, &snapshot);
                     self.initialize_simulated_orders(&code, timestamp_ms)?;
                 }
             }
@@ -328,6 +346,7 @@ impl OrderBookWorkerPool {
         write_snapshot_parquet: bool,
         snapshot_parquet_dir: impl Into<PathBuf>,
         trading_store: Option<TradingStore>,
+        market_state: MarketState,
     ) -> Result<Self> {
         if worker_count == 0 {
             bail!("orderbook_workers must be greater than zero");
@@ -343,6 +362,7 @@ impl OrderBookWorkerPool {
                 write_snapshot_parquet,
                 snapshot_parquet_dir: snapshot_parquet_dir.clone(),
                 trading_store: trading_store.clone(),
+                market_state: market_state.clone(),
                 current_day: None,
                 codes: HashMap::new(),
             };

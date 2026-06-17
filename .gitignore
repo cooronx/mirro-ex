@@ -9,3 +9,5 @@ __pycache__
 logs/
 .clickhouse/
 scripts/migrate_code_day.py
+webui/node_modules/
+webui/dist/

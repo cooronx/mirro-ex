@@ -200,6 +200,10 @@ impl OrderBook {
         self.best_price(BookSide::Ask)
     }
 
+    pub fn last_trade_price(&self) -> Option<i64> {
+        self.last_trade_price
+    }
+
     pub fn visible_qty_at(&self, direction: OrderDirection, price: i64) -> i64 {
         match direction {
             OrderDirection::Buy => self

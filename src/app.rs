@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use tracing::info;
 
 use crate::config::AppConfig;
+use crate::market::MarketState;
 use crate::orderbook_worker::OrderBookWorkerPool;
 use crate::publisher::NatsDispatcher;
 use crate::replay::{
@@ -28,6 +29,7 @@ impl OrderBookSnapshotHandler {
         write_snapshot_parquet: bool,
         snapshot_parquet_dir: String,
         trading_store: TradingStore,
+        market_state: MarketState,
         dispatcher: NatsDispatcher,
     ) -> Result<Self> {
         Ok(Self {
@@ -38,6 +40,7 @@ impl OrderBookSnapshotHandler {
                 write_snapshot_parquet,
                 snapshot_parquet_dir,
                 Some(trading_store),
+                market_state,
             )?,
             _dispatcher: dispatcher,
         })
@@ -68,6 +71,7 @@ pub async fn run_with_control(
     task_config: ReplayTaskConfig,
     command_rx: mpsc::UnboundedReceiver<crate::replay::ReplayCommand>,
     status_reporter: ReplayStatusReporter,
+    market_state: MarketState,
 ) -> Result<ReplayRunReport> {
     run_internal(
         config,
@@ -76,6 +80,7 @@ pub async fn run_with_control(
             command_rx,
             status_reporter,
         }),
+        market_state,
     )
     .await
 }
@@ -84,6 +89,7 @@ async fn run_internal(
     config: AppConfig,
     task_config: ReplayTaskConfig,
     control: Option<ReplayControl>,
+    market_state: MarketState,
 ) -> Result<ReplayRunReport> {
     let parquet_output_dir = config.replay.snapshot_parquet_dir.clone();
     let write_snapshot_parquet = config.replay.write_snapshot_parquet;
@@ -137,6 +143,7 @@ async fn run_internal(
         write_snapshot_parquet,
         parquet_output_dir,
         trading_store,
+        market_state,
         dispatcher,
     )?;
 

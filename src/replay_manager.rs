@@ -9,6 +9,7 @@ use tracing::error;
 
 use crate::app;
 use crate::config::{AppConfig, DEFAULT_CONFIG_PATH, ReplayConfig};
+use crate::market::MarketState;
 use crate::replay::{
     ReplayCommand, ReplayRuntimeState, ReplayStatusReporter, ReplayStatusSnapshot,
 };
@@ -147,6 +148,7 @@ pub struct ReplayConfigResponse {
 
 pub struct ReplayManager {
     base_config: AppConfig,
+    market_state: MarketState,
     status: Arc<RwLock<ReplayStatusSnapshot>>,
     command_tx: Arc<Mutex<Option<mpsc::UnboundedSender<ReplayCommand>>>>,
     task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -154,9 +156,10 @@ pub struct ReplayManager {
 }
 
 impl ReplayManager {
-    pub fn new(base_config: AppConfig) -> Self {
+    pub fn new(base_config: AppConfig, market_state: MarketState) -> Self {
         Self {
             base_config,
+            market_state,
             status: Arc::new(RwLock::new(ReplayStatusSnapshot::default())),
             command_tx: Arc::new(Mutex::new(None)),
             task: Arc::new(Mutex::new(None)),
@@ -196,11 +199,17 @@ impl ReplayManager {
         }
 
         let config = self.base_config.clone();
+        let market_state = self.market_state.clone();
         let reporter_for_task = reporter.clone();
         let task = tokio::spawn(async move {
-            if let Err(err) =
-                app::run_with_control(config, task_config, command_rx, reporter_for_task.clone())
-                    .await
+            if let Err(err) = app::run_with_control(
+                config,
+                task_config,
+                command_rx,
+                reporter_for_task.clone(),
+                market_state,
+            )
+            .await
             {
                 let error_chain = error_chain(err);
                 error!(error_chain = %error_chain, "replay task failed");

@@ -3,6 +3,7 @@ mod common;
 mod config;
 mod db;
 mod logging;
+mod market;
 mod marketdata;
 mod matcher;
 mod orderbook_worker;
