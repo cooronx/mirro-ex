@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use salvo::sse::{SseEvent, SseKeepAlive};
 use salvo::prelude::*;
+use salvo::sse::{SseEvent, SseKeepAlive};
 use tokio::sync::broadcast;
 
-use crate::event_bus::EventBus;
+use crate::webdata::EventBus;
 
 pub fn router(event_bus: EventBus) -> Router {
     Router::with_path("events").get(EventsHandler { event_bus })

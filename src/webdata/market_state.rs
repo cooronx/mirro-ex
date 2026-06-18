@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 
-use crate::event_bus::{AppEvent, EventBus};
 use crate::matcher::order_book::{LevelSnapshot, OrderBookSnapshot};
+use crate::webdata::{AppEvent, EventBus};
 
 const INTRADAY_BUCKET_MS: i64 = 3_000;
 const MAX_INTRADAY_POINTS: usize = 2_000;

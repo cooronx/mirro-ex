@@ -2,9 +2,7 @@ mod app;
 mod common;
 mod config;
 mod db;
-mod event_bus;
 mod logging;
-mod market;
 mod marketdata;
 mod matcher;
 mod orderbook_worker;
@@ -15,6 +13,7 @@ mod sim_clock;
 mod snapshot_exporter;
 mod trading;
 mod web;
+mod webdata;
 
 use anyhow::Result;
 use tracing::error;

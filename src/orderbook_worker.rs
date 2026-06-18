@@ -19,11 +19,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::oneshot;
 
 use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
-use crate::market::MarketState;
 use crate::matcher::order_book::OrderBook;
 use crate::replay::ReplayEvent;
 use crate::snapshot_exporter::SnapshotParquetExporter;
 use crate::trading::{SIDE_BUY, SIDE_SELL, TradingStore};
+use crate::webdata::MarketState;
 
 type WorkerReply = oneshot::Sender<Result<()>>;
 

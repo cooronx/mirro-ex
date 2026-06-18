@@ -32,9 +32,9 @@ use crate::db::dbpool::{DbPool, DbPoolError};
 use crate::db::queries::sh_order_query::SHOrderRangeQuery;
 use crate::db::queries::sz_order_query::SZOrderRangeQuery;
 use crate::db::queries::transaction_query::TransactionRangeQuery;
-use crate::event_bus::{AppEvent, EventBus};
 use crate::replay_manager::ReplayTaskConfig;
 use crate::sim_clock::SimClock;
+use crate::webdata::{AppEvent, EventBus};
 
 use super::coordinator::{ReplayCoordinator, ReplayCoordinatorError};
 use super::db_reader::{ReplayDbReader, ReplayDbReaderError};

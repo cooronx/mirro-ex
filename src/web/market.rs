@@ -1,4 +1,4 @@
-use crate::market::MarketState;
+use crate::webdata::MarketState;
 
 use std::sync::Arc;
 

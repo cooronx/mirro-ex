@@ -38,4 +38,3 @@ impl EventBus {
         let _ = self.tx.send(event);
     }
 }
-

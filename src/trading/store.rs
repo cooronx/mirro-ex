@@ -12,8 +12,8 @@ use crate::db::queries::trading_order_query::{
     query_working_orders_by_code_price_side, update_order_fill, update_order_status,
 };
 use crate::db::queries::trading_position_query::{freeze_position, release_position};
-use crate::event_bus::{AppEvent, EventBus};
 use crate::matcher::order_book::LevelSnapshot;
+use crate::webdata::{AppEvent, EventBus};
 
 use super::error::{StoreResult, TradingStoreError};
 use super::matching::{apply_fill, planned_fills_from_levels};
