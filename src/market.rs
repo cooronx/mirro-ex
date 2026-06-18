@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 
@@ -55,6 +55,7 @@ struct MarketSnapshot {
 pub struct MarketState {
     snapshots: Arc<RwLock<HashMap<String, MarketSnapshot>>>,
     event_bus: Option<EventBus>,
+    last_event_bucket: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 impl MarketState {
@@ -66,7 +67,19 @@ impl MarketState {
         Self {
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             event_bus: Some(event_bus),
+            last_event_bucket: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn clear(&self) {
+        self.snapshots
+            .write()
+            .expect("market state lock poisoned")
+            .clear();
+        self.last_event_bucket
+            .lock()
+            .expect("market event bucket lock poisoned")
+            .clear();
     }
 
     pub fn update(
@@ -103,7 +116,9 @@ impl MarketState {
             );
         }
 
-        if let Some(event_bus) = &self.event_bus {
+        if self.should_publish_market_event(code, timestamp_ms)
+            && let Some(event_bus) = &self.event_bus
+        {
             event_bus.publish(AppEvent::MarketChanged {
                 code: code.to_string(),
             });
@@ -138,6 +153,21 @@ impl MarketState {
             points,
             next_seq: snapshot.next_intraday_seq,
         })
+    }
+
+    fn should_publish_market_event(&self, code: &str, timestamp_ms: i64) -> bool {
+        let bucket = timestamp_ms.div_euclid(INTRADAY_BUCKET_MS);
+        let mut last_buckets = self
+            .last_event_bucket
+            .lock()
+            .expect("market event bucket lock poisoned");
+        match last_buckets.get(code) {
+            Some(last_bucket) if *last_bucket == bucket => false,
+            _ => {
+                last_buckets.insert(code.to_string(), bucket);
+                true
+            }
+        }
     }
 }
 

@@ -197,6 +197,7 @@ impl ReplayManager {
         }
 
         let task_config = self.task_config_from_request(request)?;
+        self.market_state.clear();
         let active_replay_task = ReplayTaskConfigView::from(&task_config);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let reporter = match &self.event_bus {

@@ -78,6 +78,14 @@
             <dd>{{ formatDateTime(replayStatus?.sim_now_ms) }}</dd>
           </div>
           <div>
+            <dt>行情时间</dt>
+            <dd>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</dd>
+          </div>
+          <div>
+            <dt>行情延迟</dt>
+            <dd :class="marketLagClass">{{ marketLagText }}</dd>
+          </div>
+          <div>
             <dt>当前速度</dt>
             <dd>{{ replayStatus?.replay_speed ?? '-' }}</dd>
           </div>
@@ -254,6 +262,7 @@ let replayRefreshTimer: number | null = null;
 let marketRefreshTimer: number | null = null;
 let tradingRefreshTimer: number | null = null;
 let pendingReplayConfigRefresh = false;
+let marketRequestSeq = 0;
 
 type IntradayCache = {
   points: MarketPricePoint[];
@@ -310,6 +319,20 @@ const chartPriceRange = computed(() => {
   if (chartPoints.value.length === 0) return '-';
   const prices = chartPoints.value.map((point) => point.price);
   return `${formatPrice(Math.min(...prices))} - ${formatPrice(Math.max(...prices))}`;
+});
+const marketLagMs = computed(() => {
+  const simNow = replayStatus.value?.sim_now_ms;
+  const marketNow = marketSnapshot.value?.timestamp_ms;
+  if (simNow === undefined || simNow === null || marketNow === undefined || marketNow === null) return null;
+  return Math.max(0, simNow - marketNow);
+});
+const marketLagText = computed(() => formatDuration(marketLagMs.value));
+const marketLagClass = computed(() => {
+  const lag = marketLagMs.value;
+  if (lag === null) return '';
+  if (lag >= 60_000) return 'lag-danger';
+  if (lag >= 10_000) return 'lag-warning';
+  return 'lag-ok';
 });
 
 const orderColumns: TableProps['columns'] = [
@@ -408,6 +431,7 @@ function connectEventStream() {
   eventSource.addEventListener('replay_changed', (event) => {
     if (!parseAppEvent(event)) return;
     scheduleReplayRefresh(true);
+    scheduleMarketRefresh();
   });
   eventSource.addEventListener('market_changed', (event) => {
     const payload = parseAppEvent(event);
@@ -519,6 +543,7 @@ function applyActiveReplayTask(task: ReplayConfig['active_replay_task']) {
 
 async function refreshMarket() {
   const normalizedCode = code.value.trim();
+  const requestSeq = ++marketRequestSeq;
   if (!normalizedCode) {
     marketSnapshot.value = null;
     marketError.value = '';
@@ -526,20 +551,23 @@ async function refreshMarket() {
   }
   try {
     const snapshot = await getMarketSnapshot(normalizedCode);
+    if (requestSeq !== marketRequestSeq) return;
     if (code.value.trim() !== normalizedCode) return;
     marketSnapshot.value = snapshot;
     marketError.value = '';
-    await refreshIntraday(normalizedCode);
+    await refreshIntraday(normalizedCode, requestSeq);
   } catch (error) {
+    if (requestSeq !== marketRequestSeq) return;
     if (code.value.trim() !== normalizedCode) return;
     marketSnapshot.value = null;
     marketError.value = messageOf(error);
   }
 }
 
-async function refreshIntraday(normalizedCode: string) {
+async function refreshIntraday(normalizedCode: string, requestSeq?: number) {
   const cache = intradayCaches[normalizedCode] ?? { points: [], nextSeq: 0 };
   const intraday = await getMarketIntraday(normalizedCode, cache.nextSeq);
+  if (requestSeq !== undefined && requestSeq !== marketRequestSeq) return;
   if (code.value.trim() !== normalizedCode) return;
   intradayCaches[normalizedCode] = mergeIntraday(cache, intraday);
 }
@@ -696,6 +724,7 @@ async function handleStartReplay() {
       replay_speed: Number(replayForm.replay_speed),
       skip_intraday_breaks: replayForm.skip_intraday_breaks
     });
+    resetMarketView(normalizedCode);
     await refreshReplayConfig();
     showSuccess('回放已开始');
   } catch (error) {
@@ -703,6 +732,17 @@ async function handleStartReplay() {
   } finally {
     busy.replay = false;
   }
+}
+
+function resetMarketView(normalizedCode?: string) {
+  const nextCode = normalizedCode ?? code.value.trim();
+  marketRequestSeq += 1;
+  marketSnapshot.value = null;
+  marketError.value = '';
+  if (nextCode) {
+    delete intradayCaches[nextCode];
+  }
+  updatePriceChart();
 }
 
 async function runReplayAction(action: 'pause' | 'resume' | 'stop') {
@@ -868,6 +908,15 @@ function chartTimeToMs(time: Time) {
 function formatPercent(value?: number) {
   if (value === undefined || value === null) return '-';
   return `${(value * 100).toFixed(2)}%`;
+}
+
+function formatDuration(value?: number | null) {
+  if (value === undefined || value === null) return '-';
+  const totalSeconds = Math.floor(value / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
 }
 
 function messageOf(error: unknown) {

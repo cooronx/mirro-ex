@@ -121,7 +121,7 @@ body {
 
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin: 16px 0 0;
 }
@@ -143,6 +143,18 @@ dd {
   margin: 3px 0 0;
   font-size: 17px;
   font-weight: 650;
+}
+
+.lag-ok {
+  color: #15803d;
+}
+
+.lag-warning {
+  color: #b45309;
+}
+
+.lag-danger {
+  color: #b91c1c;
 }
 
 .order-form {
