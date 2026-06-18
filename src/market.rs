@@ -17,7 +17,13 @@ pub struct MarketSnapshotView {
     pub auction_qty: Option<i64>,
     pub bids: Vec<MarketLevelView>,
     pub asks: Vec<MarketLevelView>,
-    pub intraday_points: Vec<MarketPricePoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketIntradayView {
+    pub code: String,
+    pub points: Vec<MarketPricePoint>,
+    pub next_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +34,7 @@ pub struct MarketLevelView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketPricePoint {
+    pub seq: u64,
     pub timestamp_ms: i64,
     pub price: i64,
 }
@@ -40,6 +47,7 @@ struct MarketSnapshot {
     auction_qty: Option<i64>,
     snapshot: OrderBookSnapshot,
     intraday_points: Vec<MarketPricePoint>,
+    next_intraday_seq: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,7 +73,12 @@ impl MarketState {
             .get(code)
             .map(|snapshot| snapshot.intraday_points.clone())
             .unwrap_or_default();
-        let intraday_points = next_intraday_points(existing_points, timestamp_ms, last_price);
+        let existing_next_seq = snapshots
+            .get(code)
+            .map(|snapshot| snapshot.next_intraday_seq)
+            .unwrap_or(1);
+        let (intraday_points, next_intraday_seq) =
+            next_intraday_points(existing_points, existing_next_seq, timestamp_ms, last_price);
         snapshots.insert(
             code.to_string(),
             MarketSnapshot {
@@ -75,6 +88,7 @@ impl MarketState {
                 auction_qty: auction_qty(snapshot, is_call_auction),
                 snapshot: snapshot.clone(),
                 intraday_points,
+                next_intraday_seq,
             },
         );
     }
@@ -90,7 +104,22 @@ impl MarketState {
             auction_qty: snapshot.auction_qty,
             bids: levels_to_view(&snapshot.snapshot.bids),
             asks: levels_to_view(&snapshot.snapshot.asks),
-            intraday_points: snapshot.intraday_points.clone(),
+        })
+    }
+
+    pub fn intraday(&self, code: &str, from_seq: u64) -> Option<MarketIntradayView> {
+        let snapshots = self.snapshots.read().expect("market state lock poisoned");
+        let snapshot = snapshots.get(code)?;
+        let points = snapshot
+            .intraday_points
+            .iter()
+            .filter(|point| point.seq >= from_seq)
+            .cloned()
+            .collect();
+        Some(MarketIntradayView {
+            code: code.to_string(),
+            points,
+            next_seq: snapshot.next_intraday_seq,
         })
     }
 }
@@ -126,31 +155,36 @@ fn levels_to_view(levels: &[LevelSnapshot]) -> Vec<MarketLevelView> {
 
 fn next_intraday_points(
     mut points: Vec<MarketPricePoint>,
+    mut next_seq: u64,
     timestamp_ms: i64,
     last_price: Option<i64>,
-) -> Vec<MarketPricePoint> {
+) -> (Vec<MarketPricePoint>, u64) {
     let Some(price) = last_price else {
-        return points;
+        return (points, next_seq);
     };
     if let Some(last_point) = points.last_mut() {
         let last_bucket = last_point.timestamp_ms.div_euclid(INTRADAY_BUCKET_MS);
         let next_bucket = timestamp_ms.div_euclid(INTRADAY_BUCKET_MS);
         if last_bucket == next_bucket {
+            last_point.seq = next_seq;
             last_point.timestamp_ms = timestamp_ms;
             last_point.price = price;
-            return points;
+            next_seq += 1;
+            return (points, next_seq);
         }
     }
 
     points.push(MarketPricePoint {
+        seq: next_seq,
         timestamp_ms,
         price,
     });
+    next_seq += 1;
     if points.len() > MAX_INTRADAY_POINTS {
         let drop_count = points.len() - MAX_INTRADAY_POINTS;
         points.drain(0..drop_count);
     }
-    points
+    (points, next_seq)
 }
 
 #[cfg(test)]
@@ -189,7 +223,8 @@ mod tests {
         assert_eq!(snapshot.bids[0].qty, 200);
         assert_eq!(snapshot.asks[0].price, 100_000);
         assert_eq!(snapshot.asks[0].qty, 300);
-        assert_eq!(snapshot.intraday_points[0].price, 101_000);
+        let intraday = state.intraday("300274.XSHE", 0).unwrap();
+        assert_eq!(intraday.points[0].price, 101_000);
         assert!(state.get("600000.XSHG").is_none());
     }
 
@@ -213,11 +248,34 @@ mod tests {
             &snapshot,
         );
 
-        let view = state.get("300274.XSHE").unwrap();
-        assert_eq!(view.intraday_points.len(), 2);
-        assert_eq!(view.intraday_points[0].timestamp_ms, INTRADAY_BUCKET_MS - 1);
-        assert_eq!(view.intraday_points[0].price, 101_000);
-        assert_eq!(view.intraday_points[1].timestamp_ms, INTRADAY_BUCKET_MS + 1);
-        assert_eq!(view.intraday_points[1].price, 102_000);
+        let view = state.intraday("300274.XSHE", 0).unwrap();
+        assert_eq!(view.points.len(), 2);
+        assert_eq!(view.points[0].seq, 2);
+        assert_eq!(view.points[0].timestamp_ms, INTRADAY_BUCKET_MS - 1);
+        assert_eq!(view.points[0].price, 101_000);
+        assert_eq!(view.points[1].seq, 3);
+        assert_eq!(view.points[1].timestamp_ms, INTRADAY_BUCKET_MS + 1);
+        assert_eq!(view.points[1].price, 102_000);
+        assert_eq!(view.next_seq, 4);
+    }
+
+    #[tokio::test]
+    async fn returns_intraday_points_from_requested_sequence() {
+        let state = MarketState::new();
+        let snapshot = OrderBookSnapshot::default();
+        state.update("300274.XSHE", 1_000, Some(100_000), false, &snapshot);
+        state.update(
+            "300274.XSHE",
+            INTRADAY_BUCKET_MS + 1,
+            Some(101_000),
+            false,
+            &snapshot,
+        );
+
+        let view = state.intraday("300274.XSHE", 2).unwrap();
+        assert_eq!(view.points.len(), 1);
+        assert_eq!(view.points[0].seq, 2);
+        assert_eq!(view.points[0].price, 101_000);
+        assert_eq!(view.next_seq, 3);
     }
 }

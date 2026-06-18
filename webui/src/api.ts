@@ -27,6 +27,10 @@ export interface ReplayStartRequest {
   skip_intraday_breaks: boolean;
 }
 
+export interface ReplayConfig {
+  active_replay_task: ReplayStartRequest | null;
+}
+
 export interface MarketSnapshot {
   code: string;
   timestamp_ms: number;
@@ -35,7 +39,12 @@ export interface MarketSnapshot {
   auction_qty: number | null;
   bids: MarketLevel[];
   asks: MarketLevel[];
-  intraday_points: MarketPricePoint[];
+}
+
+export interface MarketIntraday {
+  code: string;
+  points: MarketPricePoint[];
+  next_seq: number;
 }
 
 export interface MarketLevel {
@@ -44,6 +53,7 @@ export interface MarketLevel {
 }
 
 export interface MarketPricePoint {
+  seq: number;
   timestamp_ms: number;
   price: number;
 }
@@ -84,6 +94,10 @@ export function getReplayStatus() {
   return request<ReplayStatus>('/replay/status');
 }
 
+export function getReplayConfig() {
+  return request<ReplayConfig>('/replay/config');
+}
+
 export function startReplay(payload: ReplayStartRequest) {
   return request<ReplayStatus>('/replay/start', jsonPost(payload));
 }
@@ -106,6 +120,12 @@ export function setReplaySpeed(replay_speed: number) {
 
 export function getMarketSnapshot(code: string) {
   return request<MarketSnapshot>(`/market/snapshot?code=${encodeURIComponent(code)}`);
+}
+
+export function getMarketIntraday(code: string, fromSeq: number) {
+  return request<MarketIntraday>(
+    `/market/intraday?code=${encodeURIComponent(code)}&from_seq=${encodeURIComponent(String(fromSeq))}`
+  );
 }
 
 export function getAccount(userId: string) {

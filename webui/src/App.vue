@@ -6,7 +6,7 @@
         <p>回放交易控制台</p>
       </div>
       <div class="topbar-controls">
-        <t-input v-model="code" class="code-input" placeholder="标的代码，例如 300274.XSHE" />
+        <t-input v-model="code" class="code-input" :disabled="replayInputsLocked" placeholder="标的代码，例如 300274.XSHE" />
         <t-tag :theme="statusTheme" variant="light">{{ replayStatus?.state ?? 'Unknown' }}</t-tag>
       </div>
     </header>
@@ -18,6 +18,7 @@
             <t-date-picker
               v-model="replayForm.replay_start_date"
               clearable
+              :disabled="replayInputsLocked"
               format="YYYY-MM-DD"
               value-type="YYYY-MM-DD"
               placeholder="选择开始日期"
@@ -27,6 +28,7 @@
             <t-date-picker
               v-model="replayForm.replay_end_date"
               clearable
+              :disabled="replayInputsLocked"
               format="YYYY-MM-DD"
               value-type="YYYY-MM-DD"
               placeholder="选择结束日期"
@@ -36,6 +38,7 @@
             <t-time-picker
               v-model="replayForm.replay_start_time"
               clearable
+              :disabled="replayInputsLocked"
               format="HH:mm:ss"
               placeholder="选择开始时间"
             />
@@ -44,20 +47,21 @@
             <t-time-picker
               v-model="replayForm.replay_end_time"
               clearable
+              :disabled="replayInputsLocked"
               format="HH:mm:ss"
               placeholder="选择结束时间"
             />
           </t-form-item>
           <t-form-item label="回放速度">
-            <t-input-number v-model="replayForm.replay_speed" :min="1" theme="normal" />
+            <t-input-number v-model="replayForm.replay_speed" :min="1" theme="normal" :disabled="replayInputsLocked" />
           </t-form-item>
           <t-form-item label="跳过午休">
-            <t-switch v-model="replayForm.skip_intraday_breaks" />
+            <t-switch v-model="replayForm.skip_intraday_breaks" :disabled="replayInputsLocked" />
           </t-form-item>
         </t-form>
 
         <div class="button-row">
-          <t-button theme="primary" :loading="busy.replay" @click="handleStartReplay">开始</t-button>
+          <t-button theme="primary" :loading="busy.replay" :disabled="replayInputsLocked" @click="handleStartReplay">开始</t-button>
           <t-button :loading="busy.replay" @click="runReplayAction('pause')">暂停</t-button>
           <t-button :loading="busy.replay" @click="runReplayAction('resume')">恢复</t-button>
           <t-button theme="danger" variant="outline" :loading="busy.replay" @click="runReplayAction('stop')">停止</t-button>
@@ -203,12 +207,17 @@ import {
 } from 'lightweight-charts';
 import {
   Account,
+  MarketIntraday,
+  MarketPricePoint,
   MarketSnapshot,
+  ReplayConfig,
   ReplayStatus,
   TradingOrder,
   createOrder,
   getAccount,
+  getMarketIntraday,
   getMarketSnapshot,
+  getReplayConfig,
   getOrders,
   getReplayStatus,
   pauseReplay,
@@ -218,9 +227,12 @@ import {
   stopReplay
 } from './api';
 
+const INTRADAY_BUCKET_MS = 3_000;
+
 const code = ref('');
 const userId = ref('');
 const replayStatus = ref<ReplayStatus | null>(null);
+const replayConfig = ref<ReplayConfig | null>(null);
 const marketSnapshot = ref<MarketSnapshot | null>(null);
 const marketError = ref('');
 const account = ref<Account | null>(null);
@@ -234,6 +246,13 @@ const chartContainer = ref<HTMLDivElement | null>(null);
 let chart: IChartApi | null = null;
 let lineSeries: ISeriesApi<'Line'> | null = null;
 let chartResizeObserver: ResizeObserver | null = null;
+
+type IntradayCache = {
+  points: MarketPricePoint[];
+  nextSeq: number;
+};
+
+const intradayCaches = reactive<Record<string, IntradayCache>>({});
 
 const replayForm = reactive({
   replay_start_date: '',
@@ -266,11 +285,16 @@ const statusTheme = computed(() => {
   return 'default';
 });
 
+const replayInputsLocked = computed(() => {
+  const state = replayStatus.value?.state;
+  return Boolean(replayConfig.value?.active_replay_task) || state === 'Running' || state === 'Paused' || state === 'Stopping';
+});
+
 const bidLevels = computed(() => padLevels(marketSnapshot.value?.bids ?? []));
 const askLevels = computed(() => padLevels(marketSnapshot.value?.asks ?? []).reverse());
 const displayPrice = computed(() => marketSnapshot.value?.auction_price ?? marketSnapshot.value?.last_price ?? null);
 
-const chartPoints = computed(() => marketSnapshot.value?.intraday_points ?? []);
+const chartPoints = computed(() => intradayCaches[code.value.trim()]?.points ?? []);
 const chartStartTime = computed(() => chartPoints.value[0]?.timestamp_ms ?? null);
 const chartEndTime = computed(() => chartPoints.value[chartPoints.value.length - 1]?.timestamp_ms ?? null);
 const chartPriceRange = computed(() => {
@@ -332,8 +356,16 @@ watch(chartPoints, () => {
   updatePriceChart();
 });
 
+watch(code, () => {
+  marketSnapshot.value = null;
+  marketError.value = '';
+  updatePriceChart();
+  refreshMarket();
+});
+
 async function refreshAll() {
   await refreshReplayStatus();
+  await refreshReplayConfig();
   await refreshMarket();
   if (userId.value.trim()) {
     await refreshAccountAndOrders(false);
@@ -348,6 +380,31 @@ async function refreshReplayStatus() {
   }
 }
 
+async function refreshReplayConfig() {
+  try {
+    replayConfig.value = await getReplayConfig();
+    applyActiveReplayTask(replayConfig.value.active_replay_task);
+  } catch {
+    // The config request is best-effort so the rest of the dashboard can keep updating.
+  }
+}
+
+function applyActiveReplayTask(task: ReplayConfig['active_replay_task']) {
+  if (!task) return;
+
+  replayForm.replay_start_date = task.replay_start_date;
+  replayForm.replay_end_date = task.replay_end_date;
+  replayForm.replay_start_time = normalizeReplayTime(task.replay_start_time);
+  replayForm.replay_end_time = normalizeReplayTime(task.replay_end_time);
+  replayForm.replay_speed = task.replay_speed;
+  replayForm.skip_intraday_breaks = task.skip_intraday_breaks;
+  speedValue.value = task.replay_speed;
+
+  if (task.replay_codes.length > 0) {
+    code.value = task.replay_codes[0];
+  }
+}
+
 async function refreshMarket() {
   const normalizedCode = code.value.trim();
   if (!normalizedCode) {
@@ -356,12 +413,43 @@ async function refreshMarket() {
     return;
   }
   try {
-    marketSnapshot.value = await getMarketSnapshot(normalizedCode);
+    const snapshot = await getMarketSnapshot(normalizedCode);
+    if (code.value.trim() !== normalizedCode) return;
+    marketSnapshot.value = snapshot;
     marketError.value = '';
+    await refreshIntraday(normalizedCode);
   } catch (error) {
+    if (code.value.trim() !== normalizedCode) return;
     marketSnapshot.value = null;
     marketError.value = messageOf(error);
   }
+}
+
+async function refreshIntraday(normalizedCode: string) {
+  const cache = intradayCaches[normalizedCode] ?? { points: [], nextSeq: 0 };
+  const intraday = await getMarketIntraday(normalizedCode, cache.nextSeq);
+  if (code.value.trim() !== normalizedCode) return;
+  intradayCaches[normalizedCode] = mergeIntraday(cache, intraday);
+}
+
+function mergeIntraday(cache: IntradayCache, intraday: MarketIntraday): IntradayCache {
+  const points = [...cache.points];
+  for (const point of intraday.points) {
+    const lastPoint = points[points.length - 1];
+    if (lastPoint && sameIntradayBucket(lastPoint, point)) {
+      points[points.length - 1] = point;
+    } else if (!points.some((existing) => existing.seq === point.seq)) {
+      points.push(point);
+    }
+  }
+  return {
+    points,
+    nextSeq: intraday.next_seq
+  };
+}
+
+function sameIntradayBucket(left: MarketPricePoint, right: MarketPricePoint) {
+  return Math.floor(left.timestamp_ms / INTRADAY_BUCKET_MS) === Math.floor(right.timestamp_ms / INTRADAY_BUCKET_MS);
 }
 
 function initPriceChart() {
@@ -496,6 +584,7 @@ async function handleStartReplay() {
       replay_speed: Number(replayForm.replay_speed),
       skip_intraday_breaks: replayForm.skip_intraday_breaks
     });
+    await refreshReplayConfig();
     showSuccess('回放已开始');
   } catch (error) {
     showError(error);
@@ -509,6 +598,7 @@ async function runReplayAction(action: 'pause' | 'resume' | 'stop') {
   try {
     const request = action === 'pause' ? pauseReplay : action === 'resume' ? resumeReplay : stopReplay;
     replayStatus.value = await request();
+    await refreshReplayConfig();
     showSuccess(action === 'pause' ? '回放已暂停' : action === 'resume' ? '回放已恢复' : '回放停止中');
   } catch (error) {
     showError(error);
@@ -574,6 +664,10 @@ function requiredReplayFields() {
     fields.push('回放速度');
   }
   return fields;
+}
+
+function normalizeReplayTime(value: string) {
+  return value.trim().split('.')[0];
 }
 
 function humanPriceToRaw(value: string) {
