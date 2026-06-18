@@ -98,21 +98,9 @@
               </div>
               <span>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</span>
             </div>
-            <svg viewBox="0 0 640 260" preserveAspectRatio="none" role="img">
-              <line
-                v-for="tick in chartYTicks"
-                :key="tick.y"
-                x1="0"
-                x2="640"
-                :y1="tick.y"
-                :y2="tick.y"
-                class="chart-grid-line"
-              />
-              <polyline v-if="chartPolyline" :points="chartPolyline" class="price-line" />
-              <text v-if="!chartPolyline" x="320" y="135" text-anchor="middle" class="chart-empty">
-                暂无日内成交价格
-              </text>
-            </svg>
+            <div ref="chartContainer" class="price-chart">
+              <div v-if="chartPoints.length === 0" class="chart-empty">暂无日内成交价格</div>
+            </div>
             <div class="chart-axis">
               <span>{{ formatTimeOnly(chartStartTime) }}</span>
               <span>{{ chartPriceRange }}</span>
@@ -200,8 +188,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, h } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, h, watch } from 'vue';
 import { MessagePlugin, type TableProps } from 'tdesign-vue-next';
+import {
+  ColorType,
+  CrosshairMode,
+  LineSeries,
+  createChart,
+  type IChartApi,
+  type ISeriesApi,
+  type LineData,
+  type Time,
+  type UTCTimestamp
+} from 'lightweight-charts';
 import {
   Account,
   MarketSnapshot,
@@ -231,6 +230,10 @@ const orderMessage = ref('');
 const orderMessageTheme = ref<'success' | 'error'>('success');
 const speedValue = ref(1);
 const refreshTimer = ref<number | null>(null);
+const chartContainer = ref<HTMLDivElement | null>(null);
+let chart: IChartApi | null = null;
+let lineSeries: ISeriesApi<'Line'> | null = null;
+let chartResizeObserver: ResizeObserver | null = null;
 
 const replayForm = reactive({
   replay_start_date: '',
@@ -275,30 +278,6 @@ const chartPriceRange = computed(() => {
   const prices = chartPoints.value.map((point) => point.price);
   return `${formatPrice(Math.min(...prices))} - ${formatPrice(Math.max(...prices))}`;
 });
-const chartYTicks = computed(() => [{ y: 48 }, { y: 130 }, { y: 212 }]);
-const chartPolyline = computed(() => {
-  const points = chartPoints.value;
-  if (points.length === 0) return '';
-  if (points.length === 1) {
-    return `0,130 640,130`;
-  }
-
-  const minTime = points[0].timestamp_ms;
-  const maxTime = points[points.length - 1].timestamp_ms;
-  const prices = points.map((point) => point.price);
-  const minPrice = Math.min(...prices);
-  const maxPrice = Math.max(...prices);
-  const timeSpan = Math.max(maxTime - minTime, 1);
-  const priceSpan = Math.max(maxPrice - minPrice, 1);
-
-  return points
-    .map((point) => {
-      const x = ((point.timestamp_ms - minTime) / timeSpan) * 640;
-      const y = 230 - ((point.price - minPrice) / priceSpan) * 200;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(' ');
-});
 
 const orderColumns: TableProps['columns'] = [
   { colKey: 'order_id', title: '订单ID', width: 230, ellipsis: true },
@@ -333,6 +312,7 @@ const orderColumns: TableProps['columns'] = [
 ];
 
 onMounted(() => {
+  initPriceChart();
   refreshAll();
   refreshTimer.value = window.setInterval(refreshAll, 1000);
 });
@@ -341,6 +321,15 @@ onUnmounted(() => {
   if (refreshTimer.value !== null) {
     window.clearInterval(refreshTimer.value);
   }
+  chartResizeObserver?.disconnect();
+  chartResizeObserver = null;
+  chart?.remove();
+  chart = null;
+  lineSeries = null;
+});
+
+watch(chartPoints, () => {
+  updatePriceChart();
 });
 
 async function refreshAll() {
@@ -372,6 +361,91 @@ async function refreshMarket() {
   } catch (error) {
     marketSnapshot.value = null;
     marketError.value = messageOf(error);
+  }
+}
+
+function initPriceChart() {
+  if (!chartContainer.value) return;
+
+  chart = createChart(chartContainer.value, {
+    autoSize: true,
+    layout: {
+      background: { type: ColorType.Solid, color: '#ffffff' },
+      textColor: '#64748b',
+      fontSize: 12
+    },
+    grid: {
+      vertLines: { color: '#eef2f7' },
+      horzLines: { color: '#e5eaf2' }
+    },
+    crosshair: {
+      mode: CrosshairMode.Normal,
+      vertLine: { color: '#94a3b8', labelBackgroundColor: '#334155' },
+      horzLine: { color: '#94a3b8', labelBackgroundColor: '#334155' }
+    },
+    rightPriceScale: {
+      borderColor: '#e2e8f0',
+      scaleMargins: { top: 0.12, bottom: 0.16 }
+    },
+    timeScale: {
+      borderColor: '#e2e8f0',
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 2,
+      barSpacing: 8,
+      fixLeftEdge: true,
+      fixRightEdge: true,
+      tickMarkFormatter: (time: Time) => formatChartTime(chartTimeToMs(time))
+    },
+    localization: {
+      priceFormatter: formatChartPrice,
+      tickmarksPriceFormatter: (prices: number[]) => prices.map(formatChartPrice),
+      timeFormatter: (time: UTCTimestamp) => formatTimeOnly(Number(time) * 1000)
+    },
+    handleScale: {
+      axisPressedMouseMove: true,
+      mouseWheel: true,
+      pinch: true
+    },
+    handleScroll: {
+      horzTouchDrag: true,
+      mouseWheel: true,
+      pressedMouseMove: true
+    }
+  });
+
+  lineSeries = chart.addSeries(LineSeries, {
+    color: '#2563eb',
+    lineWidth: 2,
+    lastValueVisible: true,
+    priceLineVisible: true,
+    priceLineColor: '#2563eb',
+    priceLineWidth: 1,
+    priceFormat: {
+      type: 'price',
+      precision: 2,
+      minMove: 0.01
+    }
+  });
+
+  chartResizeObserver = new ResizeObserver(() => {
+    nextTick(updatePriceChart);
+  });
+  chartResizeObserver.observe(chartContainer.value);
+  updatePriceChart();
+}
+
+function updatePriceChart() {
+  if (!chart || !lineSeries) return;
+
+  const data: LineData<UTCTimestamp>[] = chartPoints.value.map((point) => ({
+    time: Math.floor(point.timestamp_ms / 1000) as UTCTimestamp,
+    value: rawPriceToHuman(point.price)
+  }));
+
+  lineSeries.setData(data);
+  if (data.length > 0) {
+    chart.timeScale().fitContent();
   }
 }
 
@@ -510,9 +584,13 @@ function humanPriceToRaw(value: string) {
   return Math.round(price * 10000);
 }
 
+function rawPriceToHuman(value: number) {
+  return value / 10000;
+}
+
 function formatPrice(value?: number | null) {
   if (value === null || value === undefined) return '-';
-  return (value / 10000).toFixed(4);
+  return rawPriceToHuman(value).toFixed(4);
 }
 
 function formatMoney(value?: number | null) {
@@ -528,6 +606,24 @@ function formatDateTime(value?: number | null) {
 function formatTimeOnly(value?: number | null) {
   if (!value) return '-';
   return new Date(value).toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function formatChartPrice(value: number) {
+  return value.toFixed(2);
+}
+
+function formatChartTime(value: number) {
+  return new Date(value).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  });
+}
+
+function chartTimeToMs(time: Time) {
+  if (typeof time === 'number') return time * 1000;
+  if (typeof time === 'string') return new Date(time).getTime();
+  return new Date(time.year, time.month - 1, time.day).getTime();
 }
 
 function formatPercent(value?: number) {
