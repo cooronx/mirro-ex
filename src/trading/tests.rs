@@ -4,7 +4,8 @@ use std::fs;
 use rusqlite::{Connection, params};
 
 use super::{
-    CreateAccountRequest, CreateLimitOrderRequest, SIDE_BUY, TradingStore, TradingStoreError,
+    CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, SIDE_BUY, TradingStore,
+    TradingStoreError,
 };
 use crate::matcher::order_book::LevelSnapshot;
 
@@ -218,6 +219,242 @@ fn queued_buy_order_waits_for_real_trade_volume_before_filling() {
     assert_eq!(order_queues.get(&order.order_id), Some(&0));
     assert_eq!(account_cash(&path, "u1"), (9_700, 9_000, 700));
     assert_eq!(position_qty(&path, "u1", "300274.XSHE"), (3, 3, 0, 100));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cancel_new_buy_order_releases_frozen_cash() {
+    let (store, path) = test_store("cancel-new-buy");
+    store
+        .create_account(CreateAccountRequest {
+            user_id: "u1".to_string(),
+            initial_cash: 10_000,
+        })
+        .unwrap();
+    let order = store
+        .create_limit_order(
+            CreateLimitOrderRequest {
+                user_id: "u1".to_string(),
+                code: "300274.XSHE".to_string(),
+                side: "buy".to_string(),
+                price: 100,
+                qty: 20,
+            },
+            1_000,
+        )
+        .unwrap();
+
+    let canceled = store
+        .cancel_order(
+            CancelOrderRequest {
+                user_id: "u1".to_string(),
+                order_id: order.order_id,
+            },
+            1_100,
+        )
+        .unwrap();
+
+    assert_eq!(canceled.status, "canceled");
+    assert_eq!(canceled.updated_at, 1_100);
+    assert_eq!(account_cash(&path, "u1"), (10_000, 10_000, 0));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cancel_partially_filled_buy_order_releases_remaining_cash() {
+    let (store, path) = test_store("cancel-partial-buy");
+    store
+        .create_account(CreateAccountRequest {
+            user_id: "u1".to_string(),
+            initial_cash: 10_000,
+        })
+        .unwrap();
+    let order = store
+        .create_limit_order(
+            CreateLimitOrderRequest {
+                user_id: "u1".to_string(),
+                code: "300274.XSHE".to_string(),
+                side: "buy".to_string(),
+                price: 100,
+                qty: 10,
+            },
+            1_000,
+        )
+        .unwrap();
+    store
+        .initialize_limit_order_queue(
+            &order,
+            &[LevelSnapshot {
+                price: 90,
+                total_qty: 4,
+                order_count: 1,
+            }],
+            0,
+            1_050,
+        )
+        .unwrap();
+
+    let canceled = store
+        .cancel_order(
+            CancelOrderRequest {
+                user_id: "u1".to_string(),
+                order_id: order.order_id,
+            },
+            1_100,
+        )
+        .unwrap();
+
+    assert_eq!(canceled.filled_qty, 4);
+    assert_eq!(canceled.status, "canceled");
+    assert_eq!(account_cash(&path, "u1"), (9_640, 9_640, 0));
+    assert_eq!(position_qty(&path, "u1", "300274.XSHE"), (4, 4, 0, 90));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cancel_sell_order_releases_remaining_position() {
+    let (store, path) = test_store("cancel-sell");
+    store
+        .create_account(CreateAccountRequest {
+            user_id: "u1".to_string(),
+            initial_cash: 1_000,
+        })
+        .unwrap();
+    {
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO positions (
+                    user_id, code, long_qty, available_qty, frozen_qty, avg_price, updated_at
+                ) VALUES (?1, ?2, 10, 10, 0, 80, 1)",
+                params!["u1", "300274.XSHE"],
+            )
+            .unwrap();
+    }
+    let order = store
+        .create_limit_order(
+            CreateLimitOrderRequest {
+                user_id: "u1".to_string(),
+                code: "300274.XSHE".to_string(),
+                side: "sell".to_string(),
+                price: 100,
+                qty: 6,
+            },
+            1_000,
+        )
+        .unwrap();
+
+    let canceled = store
+        .cancel_order(
+            CancelOrderRequest {
+                user_id: "u1".to_string(),
+                order_id: order.order_id,
+            },
+            1_100,
+        )
+        .unwrap();
+
+    assert_eq!(canceled.status, "canceled");
+    assert_eq!(position_qty(&path, "u1", "300274.XSHE"), (10, 10, 0, 80));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn filled_order_cannot_be_cancelled() {
+    let (store, path) = test_store("cancel-filled");
+    store
+        .create_account(CreateAccountRequest {
+            user_id: "u1".to_string(),
+            initial_cash: 10_000,
+        })
+        .unwrap();
+    let order = store
+        .create_limit_order(
+            CreateLimitOrderRequest {
+                user_id: "u1".to_string(),
+                code: "300274.XSHE".to_string(),
+                side: "buy".to_string(),
+                price: 100,
+                qty: 5,
+            },
+            1_000,
+        )
+        .unwrap();
+    store
+        .initialize_limit_order_queue(
+            &order,
+            &[LevelSnapshot {
+                price: 100,
+                total_qty: 5,
+                order_count: 1,
+            }],
+            0,
+            1_050,
+        )
+        .unwrap();
+
+    let error = store
+        .cancel_order(
+            CancelOrderRequest {
+                user_id: "u1".to_string(),
+                order_id: order.order_id,
+            },
+            1_100,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        TradingStoreError::OrderNotCancelable { .. }
+    ));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn canceled_queued_order_is_not_matched_later() {
+    let (store, path) = test_store("cancel-queued");
+    store
+        .create_account(CreateAccountRequest {
+            user_id: "u1".to_string(),
+            initial_cash: 10_000,
+        })
+        .unwrap();
+    let order = store
+        .create_limit_order(
+            CreateLimitOrderRequest {
+                user_id: "u1".to_string(),
+                code: "300274.XSHE".to_string(),
+                side: "buy".to_string(),
+                price: 100,
+                qty: 10,
+            },
+            1_000,
+        )
+        .unwrap();
+    let (_, queue_ahead_qty) = store
+        .initialize_limit_order_queue(&order, &[], 5, 1_050)
+        .unwrap();
+    let mut order_queues = HashMap::from([(order.order_id.clone(), queue_ahead_qty.unwrap())]);
+
+    store
+        .cancel_order(
+            CancelOrderRequest {
+                user_id: "u1".to_string(),
+                order_id: order.order_id.clone(),
+            },
+            1_100,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .match_queued_limit_orders("300274.XSHE", SIDE_BUY, 100, 20, 1_200, &mut order_queues)
+            .unwrap(),
+        0
+    );
+    let orders = store.list_orders("u1").unwrap();
+    assert_eq!(orders[0].status, "canceled");
+    assert_eq!(orders[0].filled_qty, 0);
+    assert_eq!(account_cash(&path, "u1"), (10_000, 10_000, 0));
     let _ = fs::remove_file(path);
 }
 

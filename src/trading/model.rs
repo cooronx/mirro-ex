@@ -7,6 +7,7 @@ pub const STATUS_NEW: &str = "new";
 pub const STATUS_WORKING: &str = "working";
 pub const STATUS_PARTIALLY_FILLED: &str = "partially_filled";
 pub const STATUS_FILLED: &str = "filled";
+pub const STATUS_CANCELED: &str = "canceled";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Account {
@@ -69,4 +70,10 @@ pub struct CreateLimitOrderRequest {
     pub side: String,
     pub price: i64,
     pub qty: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CancelOrderRequest {
+    pub user_id: String,
+    pub order_id: String,
 }

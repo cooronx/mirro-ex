@@ -24,6 +24,10 @@ pub enum TradingStoreError {
     AccountAlreadyExists { user_id: String },
     #[error("account not found for user_id={user_id}")]
     AccountNotFound { user_id: String },
+    #[error("order not found for user_id={user_id} order_id={order_id}")]
+    OrderNotFound { user_id: String, order_id: String },
+    #[error("order is not cancelable: order_id={order_id} status={status}")]
+    OrderNotCancelable { order_id: String, status: String },
     #[error("failed to open sqlite trading database at {path}")]
     OpenConnection {
         path: String,
@@ -46,6 +50,13 @@ pub enum TradingStoreError {
     CreateOrder {
         user_id: String,
         code: String,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("failed to cancel order for user_id={user_id} order_id={order_id}")]
+    CancelOrder {
+        user_id: String,
+        order_id: String,
         #[source]
         source: rusqlite::Error,
     },

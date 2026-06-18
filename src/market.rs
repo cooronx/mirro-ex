@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 
+use crate::event_bus::{AppEvent, EventBus};
 use crate::matcher::order_book::{LevelSnapshot, OrderBookSnapshot};
 
 const INTRADAY_BUCKET_MS: i64 = 3_000;
@@ -53,11 +54,19 @@ struct MarketSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct MarketState {
     snapshots: Arc<RwLock<HashMap<String, MarketSnapshot>>>,
+    event_bus: Option<EventBus>,
 }
 
 impl MarketState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_event_bus(event_bus: EventBus) -> Self {
+        Self {
+            snapshots: Arc::new(RwLock::new(HashMap::new())),
+            event_bus: Some(event_bus),
+        }
     }
 
     pub fn update(
@@ -68,29 +77,37 @@ impl MarketState {
         is_call_auction: bool,
         snapshot: &OrderBookSnapshot,
     ) {
-        let mut snapshots = self.snapshots.write().expect("market state lock poisoned");
-        let existing_points = snapshots
-            .get(code)
-            .map(|snapshot| snapshot.intraday_points.clone())
-            .unwrap_or_default();
-        let existing_next_seq = snapshots
-            .get(code)
-            .map(|snapshot| snapshot.next_intraday_seq)
-            .unwrap_or(1);
-        let (intraday_points, next_intraday_seq) =
-            next_intraday_points(existing_points, existing_next_seq, timestamp_ms, last_price);
-        snapshots.insert(
-            code.to_string(),
-            MarketSnapshot {
-                timestamp_ms,
-                last_price,
-                auction_price: auction_price(snapshot, is_call_auction),
-                auction_qty: auction_qty(snapshot, is_call_auction),
-                snapshot: snapshot.clone(),
-                intraday_points,
-                next_intraday_seq,
-            },
-        );
+        {
+            let mut snapshots = self.snapshots.write().expect("market state lock poisoned");
+            let existing_points = snapshots
+                .get(code)
+                .map(|snapshot| snapshot.intraday_points.clone())
+                .unwrap_or_default();
+            let existing_next_seq = snapshots
+                .get(code)
+                .map(|snapshot| snapshot.next_intraday_seq)
+                .unwrap_or(1);
+            let (intraday_points, next_intraday_seq) =
+                next_intraday_points(existing_points, existing_next_seq, timestamp_ms, last_price);
+            snapshots.insert(
+                code.to_string(),
+                MarketSnapshot {
+                    timestamp_ms,
+                    last_price,
+                    auction_price: auction_price(snapshot, is_call_auction),
+                    auction_qty: auction_qty(snapshot, is_call_auction),
+                    snapshot: snapshot.clone(),
+                    intraday_points,
+                    next_intraday_seq,
+                },
+            );
+        }
+
+        if let Some(event_bus) = &self.event_bus {
+            event_bus.publish(AppEvent::MarketChanged {
+                code: code.to_string(),
+            });
+        }
     }
 
     pub fn get(&self, code: &str) -> Option<MarketSnapshotView> {

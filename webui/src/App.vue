@@ -193,7 +193,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, h, watch } from 'vue';
-import { MessagePlugin, type TableProps } from 'tdesign-vue-next';
+import { Button, MessagePlugin, type TableProps } from 'tdesign-vue-next';
 import {
   ColorType,
   CrosshairMode,
@@ -207,12 +207,15 @@ import {
 } from 'lightweight-charts';
 import {
   Account,
+  AppEvent,
   MarketIntraday,
   MarketPricePoint,
   MarketSnapshot,
   ReplayConfig,
   ReplayStatus,
   TradingOrder,
+  cancelOrder,
+  connectEvents,
   createOrder,
   getAccount,
   getMarketIntraday,
@@ -241,11 +244,16 @@ const orders = ref<TradingOrder[]>([]);
 const orderMessage = ref('');
 const orderMessageTheme = ref<'success' | 'error'>('success');
 const speedValue = ref(1);
-const refreshTimer = ref<number | null>(null);
+const cancelingOrderId = ref<string | null>(null);
 const chartContainer = ref<HTMLDivElement | null>(null);
 let chart: IChartApi | null = null;
 let lineSeries: ISeriesApi<'Line'> | null = null;
 let chartResizeObserver: ResizeObserver | null = null;
+let eventSource: EventSource | null = null;
+let replayRefreshTimer: number | null = null;
+let marketRefreshTimer: number | null = null;
+let tradingRefreshTimer: number | null = null;
+let pendingReplayConfigRefresh = false;
 
 type IntradayCache = {
   points: MarketPricePoint[];
@@ -274,7 +282,8 @@ const busy = reactive({
   speed: false,
   account: false,
   order: false,
-  orders: false
+  orders: false,
+  cancelOrder: false
 });
 
 const statusTheme = computed(() => {
@@ -332,19 +341,40 @@ const orderColumns: TableProps['columns'] = [
     title: '更新时间',
     width: 180,
     cell: (_h, { row }) => formatDateTime((row as TradingOrder).updated_at)
+  },
+  {
+    colKey: 'actions',
+    title: '操作',
+    width: 90,
+    fixed: 'right',
+    cell: (_h, { row }) => {
+      const order = row as TradingOrder;
+      if (!isCancelableOrder(order)) return '';
+      return h(
+        Button,
+        {
+          size: 'small',
+          theme: 'danger',
+          variant: 'outline',
+          disabled: replayStatus.value?.state !== 'Running',
+          loading: busy.cancelOrder && cancelingOrderId.value === order.order_id,
+          onClick: () => handleCancelOrder(order)
+        },
+        () => '撤单'
+      );
+    }
   }
 ];
 
 onMounted(() => {
   initPriceChart();
   refreshAll();
-  refreshTimer.value = window.setInterval(refreshAll, 1000);
+  connectEventStream();
 });
 
 onUnmounted(() => {
-  if (refreshTimer.value !== null) {
-    window.clearInterval(refreshTimer.value);
-  }
+  closeEventStream();
+  clearScheduledRefreshes();
   chartResizeObserver?.disconnect();
   chartResizeObserver = null;
   chart?.remove();
@@ -370,6 +400,88 @@ async function refreshAll() {
   if (userId.value.trim()) {
     await refreshAccountAndOrders(false);
   }
+}
+
+function connectEventStream() {
+  closeEventStream();
+  eventSource = connectEvents();
+  eventSource.addEventListener('replay_changed', (event) => {
+    if (!parseAppEvent(event)) return;
+    scheduleReplayRefresh(true);
+  });
+  eventSource.addEventListener('market_changed', (event) => {
+    const payload = parseAppEvent(event);
+    if (!payload || payload.type !== 'market_changed') return;
+    if (payload.code.trim() !== code.value.trim()) return;
+    scheduleMarketRefresh();
+    scheduleReplayRefresh(false);
+  });
+  eventSource.addEventListener('trading_changed', (event) => {
+    const payload = parseAppEvent(event);
+    if (!payload || payload.type !== 'trading_changed') return;
+    const normalizedUserId = userId.value.trim();
+    if (!normalizedUserId) return;
+    if (payload.user_id && payload.user_id !== normalizedUserId) return;
+    scheduleTradingRefresh();
+  });
+  eventSource.onerror = () => {
+    scheduleReplayRefresh(false);
+  };
+}
+
+function closeEventStream() {
+  eventSource?.close();
+  eventSource = null;
+}
+
+function parseAppEvent(event: Event) {
+  try {
+    return JSON.parse((event as MessageEvent).data) as AppEvent;
+  } catch {
+    return null;
+  }
+}
+
+function scheduleReplayRefresh(includeConfig: boolean) {
+  pendingReplayConfigRefresh = pendingReplayConfigRefresh || includeConfig;
+  if (replayRefreshTimer !== null) return;
+  replayRefreshTimer = window.setTimeout(async () => {
+    replayRefreshTimer = null;
+    const shouldRefreshConfig = pendingReplayConfigRefresh;
+    pendingReplayConfigRefresh = false;
+    await refreshReplayStatus();
+    if (shouldRefreshConfig) {
+      await refreshReplayConfig();
+    }
+  }, 250);
+}
+
+function scheduleMarketRefresh() {
+  if (marketRefreshTimer !== null) return;
+  marketRefreshTimer = window.setTimeout(async () => {
+    marketRefreshTimer = null;
+    await refreshMarket();
+  }, 250);
+}
+
+function scheduleTradingRefresh() {
+  if (tradingRefreshTimer !== null) return;
+  tradingRefreshTimer = window.setTimeout(async () => {
+    tradingRefreshTimer = null;
+    if (userId.value.trim()) {
+      await refreshAccountAndOrders(false);
+    }
+  }, 300);
+}
+
+function clearScheduledRefreshes() {
+  if (replayRefreshTimer !== null) window.clearTimeout(replayRefreshTimer);
+  if (marketRefreshTimer !== null) window.clearTimeout(marketRefreshTimer);
+  if (tradingRefreshTimer !== null) window.clearTimeout(tradingRefreshTimer);
+  replayRefreshTimer = null;
+  marketRefreshTimer = null;
+  tradingRefreshTimer = null;
+  pendingReplayConfigRefresh = false;
 }
 
 async function refreshReplayStatus() {
@@ -654,6 +766,35 @@ async function handleCreateOrder() {
   }
 }
 
+async function handleCancelOrder(order: TradingOrder) {
+  const normalizedUserId = userId.value.trim();
+  if (!normalizedUserId) {
+    showError('请输入 user_id');
+    return;
+  }
+  if (!window.confirm(`确认撤单 ${order.order_id}？`)) {
+    return;
+  }
+
+  busy.cancelOrder = true;
+  cancelingOrderId.value = order.order_id;
+  try {
+    const canceled = await cancelOrder({
+      user_id: normalizedUserId,
+      order_id: order.order_id
+    });
+    orderMessageTheme.value = 'success';
+    orderMessage.value = `撤单成功：${canceled.order_id}`;
+    showSuccess(`撤单成功：${canceled.order_id}`);
+    await refreshAccountAndOrders(false);
+  } catch (error) {
+    showError(error);
+  } finally {
+    busy.cancelOrder = false;
+    cancelingOrderId.value = null;
+  }
+}
+
 function requiredReplayFields() {
   const fields: string[] = [];
   if (!replayForm.replay_start_date.trim()) fields.push('开始日期');
@@ -664,6 +805,10 @@ function requiredReplayFields() {
     fields.push('回放速度');
   }
   return fields;
+}
+
+function isCancelableOrder(order: TradingOrder) {
+  return ['new', 'working', 'partially_filled'].includes(order.status);
 }
 
 function normalizeReplayTime(value: string) {

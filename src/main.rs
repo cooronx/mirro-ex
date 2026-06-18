@@ -2,6 +2,7 @@ mod app;
 mod common;
 mod config;
 mod db;
+mod event_bus;
 mod logging;
 mod market;
 mod marketdata;

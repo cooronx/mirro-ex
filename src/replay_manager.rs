@@ -9,6 +9,7 @@ use tracing::error;
 
 use crate::app;
 use crate::config::{AppConfig, DEFAULT_CONFIG_PATH, ReplayConfig};
+use crate::event_bus::{AppEvent, EventBus};
 use crate::market::MarketState;
 use crate::replay::{
     ReplayCommand, ReplayRuntimeState, ReplayStatusReporter, ReplayStatusSnapshot,
@@ -153,6 +154,7 @@ pub struct ReplayManager {
     command_tx: Arc<Mutex<Option<mpsc::UnboundedSender<ReplayCommand>>>>,
     task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     active_replay_task: Arc<RwLock<Option<ReplayTaskConfigView>>>,
+    event_bus: Option<EventBus>,
 }
 
 impl ReplayManager {
@@ -164,6 +166,23 @@ impl ReplayManager {
             command_tx: Arc::new(Mutex::new(None)),
             task: Arc::new(Mutex::new(None)),
             active_replay_task: Arc::new(RwLock::new(None)),
+            event_bus: None,
+        }
+    }
+
+    pub fn with_event_bus(
+        base_config: AppConfig,
+        market_state: MarketState,
+        event_bus: EventBus,
+    ) -> Self {
+        Self {
+            base_config,
+            market_state,
+            status: Arc::new(RwLock::new(ReplayStatusSnapshot::default())),
+            command_tx: Arc::new(Mutex::new(None)),
+            task: Arc::new(Mutex::new(None)),
+            active_replay_task: Arc::new(RwLock::new(None)),
+            event_bus: Some(event_bus),
         }
     }
 
@@ -180,7 +199,12 @@ impl ReplayManager {
         let task_config = self.task_config_from_request(request)?;
         let active_replay_task = ReplayTaskConfigView::from(&task_config);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let reporter = ReplayStatusReporter::new(self.status.clone());
+        let reporter = match &self.event_bus {
+            Some(event_bus) => {
+                ReplayStatusReporter::with_event_bus(self.status.clone(), event_bus.clone())
+            }
+            None => ReplayStatusReporter::new(self.status.clone()),
+        };
         reporter
             .set_status(ReplayStatusSnapshot {
                 state: ReplayRuntimeState::Running,
@@ -197,9 +221,11 @@ impl ReplayManager {
             let mut active_guard = self.active_replay_task.write().await;
             *active_guard = Some(active_replay_task);
         }
+        self.publish_replay_changed();
 
         let config = self.base_config.clone();
         let market_state = self.market_state.clone();
+        let event_bus = self.event_bus.clone();
         let reporter_for_task = reporter.clone();
         let task = tokio::spawn(async move {
             if let Err(err) = app::run_with_control(
@@ -208,6 +234,7 @@ impl ReplayManager {
                 command_rx,
                 reporter_for_task.clone(),
                 market_state,
+                event_bus,
             )
             .await
             {
@@ -237,6 +264,7 @@ impl ReplayManager {
             let mut status = self.status.write().await;
             status.state = ReplayRuntimeState::Paused;
         }
+        self.publish_replay_changed();
 
         Ok(self.status().await)
     }
@@ -253,6 +281,7 @@ impl ReplayManager {
             let mut status = self.status.write().await;
             status.state = ReplayRuntimeState::Running;
         }
+        self.publish_replay_changed();
 
         Ok(self.status().await)
     }
@@ -272,6 +301,7 @@ impl ReplayManager {
             let mut status = self.status.write().await;
             status.state = ReplayRuntimeState::Stopping;
         }
+        self.publish_replay_changed();
 
         Ok(self.status().await)
     }
@@ -299,6 +329,7 @@ impl ReplayManager {
                 task.replay_speed = request.replay_speed;
             }
         }
+        self.publish_replay_changed();
 
         Ok(self.status().await)
     }
@@ -342,6 +373,7 @@ impl ReplayManager {
             *command_guard = None;
             let mut active_guard = self.active_replay_task.write().await;
             *active_guard = None;
+            self.publish_replay_changed();
         }
     }
 
@@ -367,6 +399,12 @@ impl ReplayManager {
             skip_intraday_breaks: request.skip_intraday_breaks,
             replay_speed: request.replay_speed,
         })
+    }
+
+    fn publish_replay_changed(&self) {
+        if let Some(event_bus) = &self.event_bus {
+            event_bus.publish(AppEvent::ReplayChanged);
+        }
     }
 }
 

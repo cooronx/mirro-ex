@@ -181,6 +181,11 @@ dd {
   color: #1d5fd1;
 }
 
+.status-canceled {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
 .t-alert {
   margin-top: 12px;
 }

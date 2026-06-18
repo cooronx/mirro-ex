@@ -32,6 +32,7 @@ use crate::db::dbpool::{DbPool, DbPoolError};
 use crate::db::queries::sh_order_query::SHOrderRangeQuery;
 use crate::db::queries::sz_order_query::SZOrderRangeQuery;
 use crate::db::queries::transaction_query::TransactionRangeQuery;
+use crate::event_bus::{AppEvent, EventBus};
 use crate::replay_manager::ReplayTaskConfig;
 use crate::sim_clock::SimClock;
 
@@ -96,11 +97,22 @@ impl Default for ReplayStatusSnapshot {
 #[derive(Clone)]
 pub struct ReplayStatusReporter {
     status: Arc<RwLock<ReplayStatusSnapshot>>,
+    event_bus: Option<EventBus>,
 }
 
 impl ReplayStatusReporter {
     pub fn new(status: Arc<RwLock<ReplayStatusSnapshot>>) -> Self {
-        Self { status }
+        Self {
+            status,
+            event_bus: None,
+        }
+    }
+
+    pub fn with_event_bus(status: Arc<RwLock<ReplayStatusSnapshot>>, event_bus: EventBus) -> Self {
+        Self {
+            status,
+            event_bus: Some(event_bus),
+        }
     }
 
     pub async fn snapshot(&self) -> ReplayStatusSnapshot {
@@ -109,6 +121,7 @@ impl ReplayStatusReporter {
 
     pub async fn set_status(&self, snapshot: ReplayStatusSnapshot) {
         *self.status.write().await = snapshot;
+        self.publish_replay_changed();
     }
 
     pub async fn update_running(
@@ -193,12 +206,22 @@ impl ReplayStatusReporter {
         guard.final_lag_ms = Some(report.final_lag_ms);
         guard.error_message = None;
         guard.report = Some(report);
+        drop(guard);
+        self.publish_replay_changed();
     }
 
     pub async fn mark_failed(&self, error_message: String) {
         let mut guard = self.status.write().await;
         guard.state = ReplayRuntimeState::Failed;
         guard.error_message = Some(error_message);
+        drop(guard);
+        self.publish_replay_changed();
+    }
+
+    fn publish_replay_changed(&self) {
+        if let Some(event_bus) = &self.event_bus {
+            event_bus.publish(AppEvent::ReplayChanged);
+        }
     }
 }
 

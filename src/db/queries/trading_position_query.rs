@@ -122,3 +122,22 @@ pub fn apply_sell_fill(
         params![qty, updated_at, user_id, code],
     )
 }
+
+pub fn release_position(
+    connection: &Connection,
+    user_id: &str,
+    code: &str,
+    qty: i64,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE positions
+         SET available_qty = available_qty + ?1,
+             frozen_qty = frozen_qty - ?1,
+             updated_at = ?2
+         WHERE user_id = ?3
+           AND code = ?4
+           AND frozen_qty >= ?1",
+        params![qty, updated_at, user_id, code],
+    )
+}

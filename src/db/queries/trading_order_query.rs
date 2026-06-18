@@ -1,3 +1,4 @@
+use rusqlite::OptionalExtension;
 use rusqlite::{Connection, params};
 
 use crate::trading::TradingOrder;
@@ -57,6 +58,32 @@ pub fn query_orders_by_user_id(
     )?;
     let rows = statement.query_map(params![user_id], order_from_row)?;
     rows.collect()
+}
+
+pub fn query_order_by_id(
+    connection: &Connection,
+    order_id: &str,
+) -> rusqlite::Result<Option<TradingOrder>> {
+    connection
+        .query_row(
+            "SELECT
+                order_id,
+                user_id,
+                code,
+                side,
+                order_type,
+                price,
+                qty,
+                filled_qty,
+                status,
+                created_at,
+                updated_at
+             FROM orders
+             WHERE order_id = ?1",
+            params![order_id],
+            order_from_row,
+        )
+        .optional()
 }
 
 pub fn query_new_orders_by_code(
@@ -133,6 +160,21 @@ pub fn update_order_fill(
              updated_at = ?3
          WHERE order_id = ?4",
         params![filled_qty, status, updated_at, order_id],
+    )
+}
+
+pub fn update_order_status(
+    connection: &Connection,
+    order_id: &str,
+    status: &str,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE orders
+         SET status = ?1,
+             updated_at = ?2
+         WHERE order_id = ?3",
+        params![status, updated_at, order_id],
     )
 }
 

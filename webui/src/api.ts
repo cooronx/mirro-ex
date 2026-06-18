@@ -81,6 +81,11 @@ export interface TradingOrder {
   updated_at: number;
 }
 
+export type AppEvent =
+  | { type: 'replay_changed' }
+  | { type: 'market_changed'; code: string }
+  | { type: 'trading_changed'; user_id: string | null };
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const payload = (await response.json()) as ApiResponse<T>;
@@ -144,6 +149,14 @@ export function createOrder(payload: {
   qty: number;
 }) {
   return request<TradingOrder>('/trading/orders', jsonPost(payload));
+}
+
+export function cancelOrder(payload: { user_id: string; order_id: string }) {
+  return request<TradingOrder>('/trading/orders/cancel', jsonPost(payload));
+}
+
+export function connectEvents() {
+  return new EventSource('/events');
 }
 
 function jsonPost(payload: unknown): RequestInit {

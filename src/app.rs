@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use tracing::info;
 
 use crate::config::AppConfig;
+use crate::event_bus::EventBus;
 use crate::market::MarketState;
 use crate::orderbook_worker::OrderBookWorkerPool;
 use crate::publisher::NatsDispatcher;
@@ -72,6 +73,7 @@ pub async fn run_with_control(
     command_rx: mpsc::UnboundedReceiver<crate::replay::ReplayCommand>,
     status_reporter: ReplayStatusReporter,
     market_state: MarketState,
+    event_bus: Option<EventBus>,
 ) -> Result<ReplayRunReport> {
     run_internal(
         config,
@@ -81,6 +83,7 @@ pub async fn run_with_control(
             status_reporter,
         }),
         market_state,
+        event_bus,
     )
     .await
 }
@@ -90,11 +93,15 @@ async fn run_internal(
     task_config: ReplayTaskConfig,
     control: Option<ReplayControl>,
     market_state: MarketState,
+    event_bus: Option<EventBus>,
 ) -> Result<ReplayRunReport> {
     let parquet_output_dir = config.replay.snapshot_parquet_dir.clone();
     let write_snapshot_parquet = config.replay.write_snapshot_parquet;
     let trading_db_path = trading_db_path_from_config(&config.db.schema.trading_db_path)?;
-    let trading_store = TradingStore::new(trading_db_path);
+    let trading_store = match event_bus {
+        Some(event_bus) => TradingStore::with_event_bus(trading_db_path, event_bus),
+        None => TradingStore::new(trading_db_path),
+    };
 
     info!(
         write_snapshot_parquet = write_snapshot_parquet,

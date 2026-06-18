@@ -8,7 +8,8 @@ export default defineConfig({
     proxy: {
       '/replay': 'http://127.0.0.1:5800',
       '/trading': 'http://127.0.0.1:5800',
-      '/market': 'http://127.0.0.1:5800'
+      '/market': 'http://127.0.0.1:5800',
+      '/events': 'http://127.0.0.1:5800'
     }
   }
 });

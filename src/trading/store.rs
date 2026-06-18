@@ -4,21 +4,23 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 
 use crate::db::queries::trading_account_query::{
-    freeze_cash, insert_account, query_account_by_user_id,
+    freeze_cash, insert_account, query_account_by_user_id, release_cash,
 };
 use crate::db::queries::trading_fill_query::insert_fill;
 use crate::db::queries::trading_order_query::{
-    insert_order, query_new_orders_by_code, query_orders_by_user_id,
-    query_working_orders_by_code_price_side, update_order_fill,
+    insert_order, query_new_orders_by_code, query_order_by_id, query_orders_by_user_id,
+    query_working_orders_by_code_price_side, update_order_fill, update_order_status,
 };
-use crate::db::queries::trading_position_query::freeze_position;
+use crate::db::queries::trading_position_query::{freeze_position, release_position};
+use crate::event_bus::{AppEvent, EventBus};
 use crate::matcher::order_book::LevelSnapshot;
 
 use super::error::{StoreResult, TradingStoreError};
 use super::matching::{apply_fill, planned_fills_from_levels};
 use super::model::{
-    Account, CreateAccountRequest, CreateLimitOrderRequest, Fill, ORDER_TYPE_LIMIT, SIDE_BUY,
-    SIDE_SELL, STATUS_FILLED, STATUS_NEW, STATUS_PARTIALLY_FILLED, STATUS_WORKING, TradingOrder,
+    Account, CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, Fill,
+    ORDER_TYPE_LIMIT, SIDE_BUY, SIDE_SELL, STATUS_CANCELED, STATUS_FILLED, STATUS_NEW,
+    STATUS_PARTIALLY_FILLED, STATUS_WORKING, TradingOrder,
 };
 use super::util::{
     FILL_COUNTER, ORDER_COUNTER, checked_amount, current_unix_timestamp_ms, next_id, normalize_side,
@@ -27,12 +29,21 @@ use super::util::{
 #[derive(Clone)]
 pub struct TradingStore {
     db_path: PathBuf,
+    event_bus: Option<EventBus>,
 }
 
 impl TradingStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: db_path.into(),
+            event_bus: None,
+        }
+    }
+
+    pub fn with_event_bus(db_path: impl Into<PathBuf>, event_bus: EventBus) -> Self {
+        Self {
+            db_path: db_path.into(),
+            event_bus: Some(event_bus),
         }
     }
 
@@ -170,6 +181,7 @@ impl TradingStore {
                 source,
             })?;
 
+        self.publish_trading_changed(Some(order.user_id.clone()));
         Ok(order)
     }
 
@@ -185,6 +197,109 @@ impl TradingStore {
                 source,
             }
         })
+    }
+
+    pub fn cancel_order(
+        &self,
+        request: CancelOrderRequest,
+        sim_now_ms: i64,
+    ) -> StoreResult<TradingOrder> {
+        let user_id = request.user_id.trim().to_string();
+        let order_id = request.order_id.trim().to_string();
+        if user_id.is_empty() {
+            return Err(TradingStoreError::EmptyUserId);
+        }
+        if order_id.is_empty() {
+            return Err(TradingStoreError::OrderNotFound { user_id, order_id });
+        }
+
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| TradingStoreError::CancelOrder {
+                user_id: user_id.clone(),
+                order_id: order_id.clone(),
+                source,
+            })?;
+        let order = query_order_by_id(&tx, &order_id)
+            .map_err(|source| TradingStoreError::CancelOrder {
+                user_id: user_id.clone(),
+                order_id: order_id.clone(),
+                source,
+            })?
+            .filter(|order| order.user_id == user_id)
+            .ok_or_else(|| TradingStoreError::OrderNotFound {
+                user_id: user_id.clone(),
+                order_id: order_id.clone(),
+            })?;
+
+        if !is_cancelable_status(&order.status) || order.filled_qty >= order.qty {
+            return Err(TradingStoreError::OrderNotCancelable {
+                order_id,
+                status: order.status,
+            });
+        }
+
+        let open_qty = order.qty - order.filled_qty;
+        match order.side.as_str() {
+            SIDE_BUY => {
+                let release_amount = checked_amount(order.price, open_qty)?;
+                if release_cash(&tx, &user_id, release_amount, sim_now_ms).map_err(|source| {
+                    TradingStoreError::CancelOrder {
+                        user_id: user_id.clone(),
+                        order_id: order.order_id.clone(),
+                        source,
+                    }
+                })? == 0
+                {
+                    return Err(TradingStoreError::InsufficientCash { user_id });
+                }
+            }
+            SIDE_SELL => {
+                if release_position(&tx, &user_id, &order.code, open_qty, sim_now_ms).map_err(
+                    |source| TradingStoreError::CancelOrder {
+                        user_id: user_id.clone(),
+                        order_id: order.order_id.clone(),
+                        source,
+                    },
+                )? == 0
+                {
+                    return Err(TradingStoreError::InsufficientPosition {
+                        user_id,
+                        code: order.code,
+                    });
+                }
+            }
+            _ => {
+                return Err(TradingStoreError::UnsupportedSide {
+                    side: order.side.clone(),
+                });
+            }
+        }
+
+        update_order_status(&tx, &order.order_id, STATUS_CANCELED, sim_now_ms).map_err(
+            |source| TradingStoreError::CancelOrder {
+                user_id: order.user_id.clone(),
+                order_id: order.order_id.clone(),
+                source,
+            },
+        )?;
+        let canceled_order = query_order_by_id(&tx, &order.order_id)
+            .map_err(|source| TradingStoreError::CancelOrder {
+                user_id: order.user_id.clone(),
+                order_id: order.order_id.clone(),
+                source,
+            })?
+            .expect("order exists after status update");
+        tx.commit()
+            .map_err(|source| TradingStoreError::CancelOrder {
+                user_id: canceled_order.user_id.clone(),
+                order_id: canceled_order.order_id.clone(),
+                source,
+            })?;
+
+        self.publish_trading_changed(Some(canceled_order.user_id.clone()));
+        Ok(canceled_order)
     }
 
     pub fn new_limit_orders(&self, code: &str) -> StoreResult<Vec<TradingOrder>> {
@@ -252,6 +367,9 @@ impl TradingStore {
                 code: order.code.clone(),
                 source,
             })?;
+        if fill_count > 0 {
+            self.publish_trading_changed(Some(order.user_id.clone()));
+        }
         let queue_ahead_qty = (filled_qty < order.qty).then_some(queue_ahead_qty);
         Ok((fill_count, queue_ahead_qty))
     }
@@ -345,6 +463,9 @@ impl TradingStore {
                 code: code.to_string(),
                 source,
             })?;
+        if fill_count > 0 {
+            self.publish_trading_changed(None);
+        }
         Ok(fill_count)
     }
 
@@ -354,4 +475,17 @@ impl TradingStore {
             source,
         })
     }
+
+    fn publish_trading_changed(&self, user_id: Option<String>) {
+        if let Some(event_bus) = &self.event_bus {
+            event_bus.publish(AppEvent::TradingChanged { user_id });
+        }
+    }
+}
+
+fn is_cancelable_status(status: &str) -> bool {
+    matches!(
+        status,
+        STATUS_NEW | STATUS_WORKING | STATUS_PARTIALLY_FILLED
+    )
 }
