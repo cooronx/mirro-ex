@@ -31,10 +31,21 @@ export interface MarketSnapshot {
   code: string;
   timestamp_ms: number;
   last_price: number | null;
-  bid1_price: number | null;
-  bid1_qty: number | null;
-  ask1_price: number | null;
-  ask1_qty: number | null;
+  auction_price: number | null;
+  auction_qty: number | null;
+  bids: MarketLevel[];
+  asks: MarketLevel[];
+  intraday_points: MarketPricePoint[];
+}
+
+export interface MarketLevel {
+  price: number;
+  qty: number;
+}
+
+export interface MarketPricePoint {
+  timestamp_ms: number;
+  price: number;
 }
 
 export interface Account {

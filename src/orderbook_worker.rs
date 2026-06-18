@@ -131,9 +131,10 @@ impl WorkerState {
         }
 
         if !state.book.has_unsettled_holdings() {
-            let snapshot = self.current_snapshot(&code, timestamp_ms)?;
+            let is_call_auction = is_call_auction_time(timestamp_ms);
+            let snapshot = self.current_snapshot(&code, timestamp_ms, is_call_auction)?;
             self.record_snapshot(&code, timestamp_ms, &snapshot)?;
-            self.record_market_snapshot(&code, timestamp_ms, &snapshot);
+            self.record_market_snapshot(&code, timestamp_ms, is_call_auction, &snapshot);
             self.initialize_simulated_orders(&code, timestamp_ms)?;
             if let Some(transaction) = transaction_for_matching {
                 self.match_simulated_orders_from_transaction(&code, &transaction, timestamp_ms)?;
@@ -145,13 +146,14 @@ impl WorkerState {
     fn current_snapshot(
         &mut self,
         code: &str,
-        timestamp_ms: i64,
+        _timestamp_ms: i64,
+        is_call_auction: bool,
     ) -> Result<crate::matcher::order_book::OrderBookSnapshot> {
         let state = self
             .codes
             .get_mut(code)
             .context("missing order book state for snapshot")?;
-        let snapshot = if is_call_auction_time(timestamp_ms) {
+        let snapshot = if is_call_auction {
             state.book.call_auction_snapshot(self.snapshot_depth)
         } else {
             state.book.snapshot(self.snapshot_depth)
@@ -201,6 +203,7 @@ impl WorkerState {
         &self,
         code: &str,
         timestamp_ms: i64,
+        is_call_auction: bool,
         snapshot: &crate::matcher::order_book::OrderBookSnapshot,
     ) {
         let Some(state) = self.codes.get(code) else {
@@ -208,7 +211,7 @@ impl WorkerState {
         };
         let last_price = state.book.last_trade_price();
         self.market_state
-            .update(code, timestamp_ms, last_price, snapshot);
+            .update(code, timestamp_ms, last_price, is_call_auction, snapshot);
     }
 
     fn initialize_simulated_orders(&mut self, code: &str, timestamp_ms: i64) -> Result<()> {
@@ -311,9 +314,10 @@ impl WorkerState {
 
             if changed {
                 if let Some(timestamp_ms) = timestamp_ms {
-                    let snapshot = self.current_snapshot(&code, timestamp_ms)?;
+                    let is_call_auction = is_call_auction_time(timestamp_ms);
+                    let snapshot = self.current_snapshot(&code, timestamp_ms, is_call_auction)?;
                     self.record_snapshot(&code, timestamp_ms, &snapshot)?;
-                    self.record_market_snapshot(&code, timestamp_ms, &snapshot);
+                    self.record_market_snapshot(&code, timestamp_ms, is_call_auction, &snapshot);
                     self.initialize_simulated_orders(&code, timestamp_ms)?;
                 }
             }

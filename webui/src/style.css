@@ -88,16 +88,11 @@ body {
   width: 150px;
 }
 
-.status-grid,
-.quote-grid {
+.status-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin: 16px 0 0;
-}
-
-.quote-grid {
-  grid-template-columns: 1fr;
 }
 
 dt {
@@ -152,12 +147,134 @@ dd {
   margin-top: 12px;
 }
 
+.market-panel {
+  grid-column: span 2;
+}
+
+.market-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 14px;
+  min-height: 340px;
+}
+
+.intraday-chart {
+  display: grid;
+  grid-template-rows: auto minmax(240px, 1fr) auto;
+  min-width: 0;
+  padding: 4px 0 0;
+}
+
+.chart-header,
+.chart-axis {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chart-header span,
+.chart-axis {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.intraday-chart svg {
+  width: 100%;
+  height: 260px;
+  margin-top: 10px;
+  overflow: visible;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+
+.chart-grid-line {
+  stroke: #e8edf4;
+  stroke-width: 1;
+}
+
+.price-line {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-empty {
+  fill: #9ca3af;
+  font-size: 14px;
+}
+
+.orderbook {
+  display: grid;
+  grid-template-rows: auto 1fr auto 1fr;
+  min-width: 0;
+  border-left: 1px solid #edf0f5;
+  padding-left: 14px;
+}
+
+.orderbook-title {
+  margin-bottom: 8px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.book-side {
+  display: grid;
+  gap: 4px;
+}
+
+.book-row {
+  display: grid;
+  grid-template-columns: 44px minmax(76px, 1fr) 72px;
+  align-items: center;
+  min-height: 26px;
+  font-size: 13px;
+}
+
+.book-row span {
+  color: #6b7280;
+}
+
+.book-row strong {
+  font-weight: 700;
+  text-align: right;
+}
+
+.book-row em {
+  color: #4b5563;
+  font-style: normal;
+  text-align: right;
+}
+
+.ask-row strong {
+  color: #d92d20;
+}
+
+.bid-row strong {
+  color: #07824f;
+}
+
+.last-price {
+  margin: 10px 0;
+  padding: 9px 0;
+  border-top: 1px solid #edf0f5;
+  border-bottom: 1px solid #edf0f5;
+  color: #111827;
+  font-size: 22px;
+  font-weight: 750;
+  text-align: center;
+}
+
 @media (max-width: 1080px) {
   .grid {
     grid-template-columns: 1fr 1fr;
   }
 
-  .replay-panel {
+  .replay-panel,
+  .market-panel {
     grid-column: span 2;
     grid-row: auto;
   }
@@ -185,11 +302,20 @@ dd {
 
   .grid,
   .form-grid,
-  .status-grid {
+  .status-grid,
+  .market-layout {
     grid-template-columns: 1fr;
   }
 
-  .replay-panel {
+  .replay-panel,
+  .market-panel {
     grid-column: auto;
+  }
+
+  .orderbook {
+    border-left: 0;
+    border-top: 1px solid #edf0f5;
+    padding-top: 14px;
+    padding-left: 0;
   }
 }

@@ -89,24 +89,58 @@
       </t-card>
 
       <t-card title="行情" bordered class="panel market-panel">
-        <dl class="quote-grid">
-          <div>
-            <dt>最新价</dt>
-            <dd>{{ formatPrice(marketSnapshot?.last_price) }}</dd>
+        <div class="market-layout">
+          <div class="intraday-chart">
+            <div class="chart-header">
+              <div>
+                <dt>最新价</dt>
+                <dd>{{ formatPrice(displayPrice) }}</dd>
+              </div>
+              <span>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</span>
+            </div>
+            <svg viewBox="0 0 640 260" preserveAspectRatio="none" role="img">
+              <line
+                v-for="tick in chartYTicks"
+                :key="tick.y"
+                x1="0"
+                x2="640"
+                :y1="tick.y"
+                :y2="tick.y"
+                class="chart-grid-line"
+              />
+              <polyline v-if="chartPolyline" :points="chartPolyline" class="price-line" />
+              <text v-if="!chartPolyline" x="320" y="135" text-anchor="middle" class="chart-empty">
+                暂无日内成交价格
+              </text>
+            </svg>
+            <div class="chart-axis">
+              <span>{{ formatTimeOnly(chartStartTime) }}</span>
+              <span>{{ chartPriceRange }}</span>
+              <span>{{ formatTimeOnly(chartEndTime) }}</span>
+            </div>
           </div>
-          <div>
-            <dt>卖一</dt>
-            <dd>{{ formatPrice(marketSnapshot?.ask1_price) }} / {{ marketSnapshot?.ask1_qty ?? '-' }}</dd>
+
+          <div class="orderbook">
+            <div class="orderbook-title">五档盘口</div>
+            <div class="book-side asks">
+              <div v-for="(level, index) in askLevels" :key="`ask-${index}`" class="book-row ask-row">
+                <span>卖{{ 5 - index }}</span>
+                <strong>{{ formatPrice(level?.price) }}</strong>
+                <em>{{ level?.qty ?? '-' }}</em>
+              </div>
+            </div>
+            <div class="last-price">
+              {{ formatPrice(displayPrice) }}
+            </div>
+            <div class="book-side bids">
+              <div v-for="(level, index) in bidLevels" :key="`bid-${index}`" class="book-row bid-row">
+                <span>买{{ index + 1 }}</span>
+                <strong>{{ formatPrice(level?.price) }}</strong>
+                <em>{{ level?.qty ?? '-' }}</em>
+              </div>
+            </div>
           </div>
-          <div>
-            <dt>买一</dt>
-            <dd>{{ formatPrice(marketSnapshot?.bid1_price) }} / {{ marketSnapshot?.bid1_qty ?? '-' }}</dd>
-          </div>
-          <div>
-            <dt>更新时间</dt>
-            <dd>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</dd>
-          </div>
-        </dl>
+        </div>
         <t-alert v-if="marketError" theme="warning" :message="marketError" />
       </t-card>
 
@@ -227,6 +261,43 @@ const statusTheme = computed(() => {
   if (state === 'Paused') return 'warning';
   if (state === 'Failed') return 'danger';
   return 'default';
+});
+
+const bidLevels = computed(() => padLevels(marketSnapshot.value?.bids ?? []));
+const askLevels = computed(() => padLevels(marketSnapshot.value?.asks ?? []).reverse());
+const displayPrice = computed(() => marketSnapshot.value?.auction_price ?? marketSnapshot.value?.last_price ?? null);
+
+const chartPoints = computed(() => marketSnapshot.value?.intraday_points ?? []);
+const chartStartTime = computed(() => chartPoints.value[0]?.timestamp_ms ?? null);
+const chartEndTime = computed(() => chartPoints.value[chartPoints.value.length - 1]?.timestamp_ms ?? null);
+const chartPriceRange = computed(() => {
+  if (chartPoints.value.length === 0) return '-';
+  const prices = chartPoints.value.map((point) => point.price);
+  return `${formatPrice(Math.min(...prices))} - ${formatPrice(Math.max(...prices))}`;
+});
+const chartYTicks = computed(() => [{ y: 48 }, { y: 130 }, { y: 212 }]);
+const chartPolyline = computed(() => {
+  const points = chartPoints.value;
+  if (points.length === 0) return '';
+  if (points.length === 1) {
+    return `0,130 640,130`;
+  }
+
+  const minTime = points[0].timestamp_ms;
+  const maxTime = points[points.length - 1].timestamp_ms;
+  const prices = points.map((point) => point.price);
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const timeSpan = Math.max(maxTime - minTime, 1);
+  const priceSpan = Math.max(maxPrice - minPrice, 1);
+
+  return points
+    .map((point) => {
+      const x = ((point.timestamp_ms - minTime) / timeSpan) * 640;
+      const y = 230 - ((point.price - minPrice) / priceSpan) * 200;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(' ');
 });
 
 const orderColumns: TableProps['columns'] = [
@@ -454,6 +525,11 @@ function formatDateTime(value?: number | null) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
+function formatTimeOnly(value?: number | null) {
+  if (!value) return '-';
+  return new Date(value).toLocaleTimeString('zh-CN', { hour12: false });
+}
+
 function formatPercent(value?: number) {
   if (value === undefined || value === null) return '-';
   return `${(value * 100).toFixed(2)}%`;
@@ -480,5 +556,9 @@ function showSuccess(message: string) {
     placement: 'top-right',
     duration: 2500
   });
+}
+
+function padLevels<T>(levels: T[]): Array<T | null> {
+  return Array.from({ length: 5 }, (_, index) => levels[index] ?? null);
 }
 </script>
