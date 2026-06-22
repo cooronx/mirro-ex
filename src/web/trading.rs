@@ -20,6 +20,7 @@ const TRADING_INVALID_ACCOUNT_QUERY_CODE: i32 = 2002;
 const TRADING_INVALID_ORDER_REQUEST_CODE: i32 = 2003;
 const TRADING_INVALID_ORDER_QUERY_CODE: i32 = 2004;
 const TRADING_INVALID_CANCEL_ORDER_REQUEST_CODE: i32 = 2005;
+const TRADING_INVALID_POSITION_QUERY_CODE: i32 = 2006;
 const TRADING_EMPTY_USER_ID_CODE: i32 = 2101;
 const TRADING_INVALID_INITIAL_CASH_CODE: i32 = 2102;
 const TRADING_INVALID_ORDER_CODE: i32 = 2103;
@@ -52,7 +53,10 @@ pub fn router(trading_store: Arc<TradingStore>, replay_manager: Arc<ReplayManage
             trading_store: trading_store.clone(),
             replay_manager,
         }))
-        .push(Router::with_path("orders").get(GetOrdersHandler { trading_store }))
+        .push(Router::with_path("orders").get(GetOrdersHandler {
+            trading_store: trading_store.clone(),
+        }))
+        .push(Router::with_path("positions").get(GetPositionsHandler { trading_store }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +67,12 @@ struct GetAccountQuery {
 #[derive(Debug, Deserialize)]
 struct GetOrdersQuery {
     user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetPositionsQuery {
+    user_id: String,
+    code: Option<String>,
 }
 
 struct CreateAccountHandler {
@@ -84,6 +94,10 @@ struct CancelOrderHandler {
 }
 
 struct GetOrdersHandler {
+    trading_store: Arc<TradingStore>,
+}
+
+struct GetPositionsHandler {
     trading_store: Arc<TradingStore>,
 }
 
@@ -246,6 +260,43 @@ impl Handler for GetOrdersHandler {
 }
 
 #[async_trait]
+impl Handler for GetPositionsHandler {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        _depot: &mut Depot,
+        res: &mut Response,
+        _ctrl: &mut FlowCtrl,
+    ) {
+        let Some(query) = parse_query::<GetPositionsQuery>(
+            req,
+            res,
+            TRADING_INVALID_POSITION_QUERY_CODE,
+            "invalid position query",
+        ) else {
+            return;
+        };
+
+        let trading_store = self.trading_store.clone();
+        match task::spawn_blocking(move || {
+            trading_store.list_positions(&query.user_id, query.code.as_deref())
+        })
+        .await
+        {
+            Ok(Ok(positions)) => res.render(Json(ApiResponse::success(positions))),
+            Ok(Err(err)) => render_trading_error(res, err),
+            Err(err) => {
+                render_api_error(
+                    res,
+                    TRADING_INTERNAL_TASK_CODE,
+                    format!("position query task join failed: {err}"),
+                );
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl Handler for CancelOrderHandler {
     async fn handle(
         &self,
@@ -321,6 +372,7 @@ fn render_trading_error(res: &mut Response, err: TradingStoreError) {
         | TradingStoreError::CreateOrder { .. }
         | TradingStoreError::CancelOrder { .. }
         | TradingStoreError::QueryOrders { .. }
+        | TradingStoreError::QueryPositions { .. }
         | TradingStoreError::MatchOrders { .. } => TRADING_INTERNAL_STORE_CODE,
     };
 

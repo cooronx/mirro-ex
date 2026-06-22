@@ -190,6 +190,17 @@
       </t-card>
     </section>
 
+    <t-card title="持仓" bordered class="positions-panel">
+      <t-table
+        row-key="code"
+        size="small"
+        :data="positions"
+        :columns="positionColumns"
+        :loading="busy.positions"
+        :pagination="positionPagination"
+      />
+    </t-card>
+
     <t-card title="订单" bordered class="orders-panel">
       <t-table
         row-key="order_id"
@@ -197,7 +208,7 @@
         :data="orders"
         :columns="orderColumns"
         :loading="busy.orders"
-        :pagination="{ defaultPageSize: 10, showJumper: true }"
+        :pagination="orderPagination"
       />
     </t-card>
   </main>
@@ -226,6 +237,7 @@ import {
   ReplayConfig,
   ReplayStatus,
   TradingOrder,
+  TradingPosition,
   cancelOrder,
   connectEvents,
   createAccount,
@@ -233,8 +245,9 @@ import {
   getAccount,
   getMarketIntraday,
   getMarketSnapshot,
-  getReplayConfig,
   getOrders,
+  getPositions,
+  getReplayConfig,
   getReplayStatus,
   pauseReplay,
   resumeReplay,
@@ -253,6 +266,7 @@ const marketSnapshot = ref<MarketSnapshot | null>(null);
 const marketError = ref('');
 const account = ref<Account | null>(null);
 const accountError = ref('');
+const positions = ref<TradingPosition[]>([]);
 const orders = ref<TradingOrder[]>([]);
 const orderMessage = ref('');
 const orderMessageTheme = ref<'success' | 'error'>('success');
@@ -301,6 +315,7 @@ const busy = reactive({
   account: false,
   createAccount: false,
   order: false,
+  positions: false,
   orders: false,
   cancelOrder: false
 });
@@ -344,6 +359,16 @@ const marketLagClass = computed(() => {
   if (lag >= 10_000) return 'lag-warning';
   return 'lag-ok';
 });
+const positionPagination = computed(() => ({
+  defaultPageSize: 10,
+  showJumper: true,
+  total: positions.value.length
+}));
+const orderPagination = computed(() => ({
+  defaultPageSize: 10,
+  showJumper: true,
+  total: orders.value.length
+}));
 
 const orderColumns: TableProps['columns'] = [
   { colKey: 'order_id', title: '订单ID', width: 230, ellipsis: true },
@@ -396,6 +421,31 @@ const orderColumns: TableProps['columns'] = [
         () => '撤单'
       );
     }
+  }
+];
+
+const positionColumns: TableProps['columns'] = [
+  { colKey: 'code', title: '标的', width: 140 },
+  { colKey: 'long_qty', title: '总持仓', width: 110 },
+  { colKey: 'available_qty', title: '可用', width: 110 },
+  { colKey: 'frozen_qty', title: '冻结', width: 110 },
+  {
+    colKey: 'avg_price',
+    title: '成本价',
+    width: 120,
+    cell: (_h, { row }) => formatPrice((row as TradingPosition).avg_price)
+  },
+  {
+    colKey: 'market_value',
+    title: '持仓成本',
+    width: 130,
+    cell: (_h, { row }) => formatMoney(positionCost(row as TradingPosition))
+  },
+  {
+    colKey: 'updated_at',
+    title: '更新时间',
+    width: 180,
+    cell: (_h, { row }) => formatDateTime((row as TradingPosition).updated_at)
   }
 ];
 
@@ -696,21 +746,26 @@ async function refreshAccountAndOrders(showLoading = true) {
   if (showLoading) {
     busy.account = true;
   }
+  busy.positions = true;
   busy.orders = true;
   try {
-    const [nextAccount, nextOrders] = await Promise.all([
+    const [nextAccount, nextPositions, nextOrders] = await Promise.all([
       getAccount(normalizedUserId),
+      getPositions(normalizedUserId),
       getOrders(normalizedUserId)
     ]);
     account.value = nextAccount;
+    positions.value = nextPositions;
     orders.value = nextOrders;
     accountError.value = '';
   } catch (error) {
     account.value = null;
+    positions.value = [];
     orders.value = [];
     accountError.value = messageOf(error);
   } finally {
     busy.account = false;
+    busy.positions = false;
     busy.orders = false;
   }
 }
@@ -732,7 +787,12 @@ async function handleCreateAccount() {
     });
     account.value = nextAccount;
     accountError.value = '';
-    orders.value = await getOrders(normalizedUserId);
+    const [nextPositions, nextOrders] = await Promise.all([
+      getPositions(normalizedUserId),
+      getOrders(normalizedUserId)
+    ]);
+    positions.value = nextPositions;
+    orders.value = nextOrders;
     showSuccess(`账户已创建：${nextAccount.user_id}`);
   } catch (error) {
     showError(error);
@@ -903,6 +963,10 @@ function humanPriceToRaw(value: string) {
 
 function rawPriceToHuman(value: number) {
   return value / 10000;
+}
+
+function positionCost(position: TradingPosition) {
+  return position.avg_price * position.long_qty;
 }
 
 function formatPrice(value?: number | null) {

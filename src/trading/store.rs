@@ -11,7 +11,9 @@ use crate::db::queries::trading_order_query::{
     insert_order, query_new_orders_by_code, query_order_by_id, query_orders_by_user_id,
     query_working_orders_by_code_price_side, update_order_fill, update_order_status,
 };
-use crate::db::queries::trading_position_query::{freeze_position, release_position};
+use crate::db::queries::trading_position_query::{
+    freeze_position, query_position, query_positions_by_user_id, release_position,
+};
 use crate::matcher::order_book::LevelSnapshot;
 use crate::webdata::{AppEvent, EventBus};
 
@@ -19,7 +21,7 @@ use super::error::{StoreResult, TradingStoreError};
 use super::matching::{apply_fill, planned_fills_from_levels};
 use super::model::{
     Account, CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, Fill,
-    ORDER_TYPE_LIMIT, SIDE_BUY, SIDE_SELL, STATUS_CANCELED, STATUS_FILLED, STATUS_NEW,
+    ORDER_TYPE_LIMIT, Position, SIDE_BUY, SIDE_SELL, STATUS_CANCELED, STATUS_FILLED, STATUS_NEW,
     STATUS_PARTIALLY_FILLED, STATUS_WORKING, TradingOrder,
 };
 use super::util::{
@@ -197,6 +199,28 @@ impl TradingStore {
                 source,
             }
         })
+    }
+
+    pub fn list_positions(&self, user_id: &str, code: Option<&str>) -> StoreResult<Vec<Position>> {
+        if user_id.is_empty() {
+            return Err(TradingStoreError::EmptyUserId);
+        }
+
+        let connection = self.open_connection()?;
+        match code.map(str::trim).filter(|code| !code.is_empty()) {
+            Some(code) => query_position(&connection, user_id, code)
+                .map(|position| position.into_iter().collect())
+                .map_err(|source| TradingStoreError::QueryPositions {
+                    user_id: user_id.to_string(),
+                    source,
+                }),
+            None => query_positions_by_user_id(&connection, user_id).map_err(|source| {
+                TradingStoreError::QueryPositions {
+                    user_id: user_id.to_string(),
+                    source,
+                }
+            }),
+        }
     }
 
     pub fn cancel_order(

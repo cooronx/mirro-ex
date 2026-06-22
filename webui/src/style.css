@@ -68,6 +68,7 @@ body {
 }
 
 .panel,
+.positions-panel,
 .orders-panel {
   border-radius: 8px;
   border-color: rgba(203, 213, 225, 0.72);
@@ -170,6 +171,7 @@ dd {
   gap: 6px;
 }
 
+.positions-panel,
 .orders-panel {
   margin-top: 16px;
 }

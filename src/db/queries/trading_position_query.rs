@@ -2,6 +2,27 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::trading::Position;
 
+pub fn query_positions_by_user_id(
+    connection: &Connection,
+    user_id: &str,
+) -> rusqlite::Result<Vec<Position>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            user_id,
+            code,
+            long_qty,
+            available_qty,
+            frozen_qty,
+            avg_price,
+            updated_at
+         FROM positions
+         WHERE user_id = ?1
+         ORDER BY code ASC",
+    )?;
+    let rows = statement.query_map(params![user_id], position_from_row)?;
+    rows.collect()
+}
+
 pub fn query_position(
     connection: &Connection,
     user_id: &str,
@@ -21,17 +42,7 @@ pub fn query_position(
              WHERE user_id = ?1
                AND code = ?2",
             params![user_id, code],
-            |row| {
-                Ok(Position {
-                    user_id: row.get(0)?,
-                    code: row.get(1)?,
-                    long_qty: row.get(2)?,
-                    available_qty: row.get(3)?,
-                    frozen_qty: row.get(4)?,
-                    avg_price: row.get(5)?,
-                    updated_at: row.get(6)?,
-                })
-            },
+            position_from_row,
         )
         .optional()
 }
@@ -140,4 +151,16 @@ pub fn release_position(
            AND frozen_qty >= ?1",
         params![qty, updated_at, user_id, code],
     )
+}
+
+fn position_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Position> {
+    Ok(Position {
+        user_id: row.get(0)?,
+        code: row.get(1)?,
+        long_qty: row.get(2)?,
+        available_qty: row.get(3)?,
+        frozen_qty: row.get(4)?,
+        avg_price: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
 }

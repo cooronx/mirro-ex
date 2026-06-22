@@ -459,6 +459,63 @@ fn canceled_queued_order_is_not_matched_later() {
 }
 
 #[test]
+fn list_positions_returns_user_positions_and_optional_code_filter() {
+    let (store, path) = test_store("list-positions");
+    store
+        .create_account(CreateAccountRequest {
+            user_id: "u1".to_string(),
+            initial_cash: 10_000,
+        })
+        .unwrap();
+    {
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO positions (
+                    user_id,
+                    code,
+                    long_qty,
+                    available_qty,
+                    frozen_qty,
+                    avg_price,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params!["u1", "300274.XSHE", 10, 8, 2, 100, 1_000],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO positions (
+                    user_id,
+                    code,
+                    long_qty,
+                    available_qty,
+                    frozen_qty,
+                    avg_price,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params!["u1", "600000.XSHG", 20, 20, 0, 200, 1_100],
+            )
+            .unwrap();
+    }
+
+    let positions = store.list_positions("u1", None).unwrap();
+    assert_eq!(positions.len(), 2);
+    assert_eq!(positions[0].code, "300274.XSHE");
+    assert_eq!(positions[1].code, "600000.XSHG");
+
+    let positions = store.list_positions("u1", Some("300274.XSHE")).unwrap();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].long_qty, 10);
+    assert_eq!(positions[0].available_qty, 8);
+    assert_eq!(positions[0].frozen_qty, 2);
+
+    let positions = store.list_positions("u1", Some("000001.XSHE")).unwrap();
+    assert!(positions.is_empty());
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn rejects_buy_order_when_cash_is_insufficient() {
     let (store, path) = test_store("cash-reject");
     store

@@ -83,6 +83,16 @@ export interface TradingOrder {
   updated_at: number;
 }
 
+export interface TradingPosition {
+  user_id: string;
+  code: string;
+  long_qty: number;
+  available_qty: number;
+  frozen_qty: number;
+  avg_price: number;
+  updated_at: number;
+}
+
 export type AppEvent =
   | { type: 'replay_changed' }
   | { type: 'market_changed'; code: string }
@@ -108,6 +118,7 @@ const API_ERROR_MESSAGES: Record<number, string> = {
   2003: '下单请求无效',
   2004: '订单查询请求无效',
   2005: '撤单请求无效',
+  2006: '持仓查询请求无效',
   2101: '请输入 user_id',
   2102: '初始资金必须大于 0',
   2103: '请输入标的代码',
@@ -210,6 +221,14 @@ export function createAccount(payload: { user_id: string; initial_cash: number }
 
 export function getOrders(userId: string) {
   return request<TradingOrder[]>(`/trading/orders?user_id=${encodeURIComponent(userId)}`);
+}
+
+export function getPositions(userId: string, code?: string) {
+  const params = new URLSearchParams({ user_id: userId });
+  if (code?.trim()) {
+    params.set('code', code.trim());
+  }
+  return request<TradingPosition[]>(`/trading/positions?${params.toString()}`);
 }
 
 export function createOrder(payload: {

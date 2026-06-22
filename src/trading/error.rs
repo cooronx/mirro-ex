@@ -66,6 +66,12 @@ pub enum TradingStoreError {
         #[source]
         source: rusqlite::Error,
     },
+    #[error("failed to query positions for user_id={user_id}")]
+    QueryPositions {
+        user_id: String,
+        #[source]
+        source: rusqlite::Error,
+    },
     #[error("failed to match orders for code={code}")]
     MatchOrders {
         code: String,
