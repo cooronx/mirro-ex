@@ -724,6 +724,7 @@ async function handleCreateAccount() {
   }
 
   busy.createAccount = true;
+  accountError.value = '';
   try {
     const nextAccount = await createAccount({
       user_id: normalizedUserId,
@@ -816,6 +817,7 @@ async function handleCreateOrder() {
   const normalizedUserId = userId.value.trim();
   const normalizedCode = code.value.trim();
   const price = humanPriceToRaw(orderForm.price);
+  orderMessage.value = '';
   if (!normalizedUserId || !normalizedCode || price === null || !orderForm.qty) {
     showError('请填写 user_id、标的代码、价格和数量');
     return;
@@ -843,6 +845,7 @@ async function handleCreateOrder() {
 
 async function handleCancelOrder(order: TradingOrder) {
   const normalizedUserId = userId.value.trim();
+  orderMessage.value = '';
   if (!normalizedUserId) {
     showError('请输入 user_id');
     return;
@@ -960,8 +963,6 @@ function messageOf(error: unknown) {
 
 function showError(error: unknown) {
   const message = messageOf(error);
-  orderMessageTheme.value = 'error';
-  orderMessage.value = message;
   MessagePlugin.error({
     content: message,
     placement: 'top-right',

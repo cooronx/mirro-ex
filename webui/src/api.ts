@@ -88,13 +88,78 @@ export type AppEvent =
   | { type: 'market_changed'; code: string }
   | { type: 'trading_changed'; user_id: string | null };
 
+const API_ERROR_MESSAGES: Record<number, string> = {
+  1000: '回放启动参数无效',
+  1001: '已有回放任务正在运行',
+  1002: '当前回放状态不能暂停',
+  1003: '当前回放状态不能恢复',
+  1004: '当前回放状态不能停止',
+  1005: '当前回放状态不能调整速度',
+  1006: '回放速度请求无效',
+  1101: '开始日期格式无效，请使用 YYYY-MM-DD',
+  1102: '结束日期格式无效，请使用 YYYY-MM-DD',
+  1103: '开始时间格式无效，请使用 HH:MM:SS',
+  1104: '结束时间格式无效，请使用 HH:MM:SS',
+  1105: '回放速度必须大于等于 1',
+  1500: '回放命令执行失败',
+
+  2001: '创建账户请求无效',
+  2002: '账户查询请求无效',
+  2003: '下单请求无效',
+  2004: '订单查询请求无效',
+  2005: '撤单请求无效',
+  2101: '请输入 user_id',
+  2102: '初始资金必须大于 0',
+  2103: '请输入标的代码',
+  2104: '价格必须大于 0',
+  2105: '数量必须大于 0',
+  2106: '订单方向不支持',
+  2201: '回放运行中才能下单或撤单',
+  2301: '可用资金不足',
+  2302: '可用持仓不足',
+  2404: '资金账户不存在',
+  2405: '订单不存在',
+  2406: '订单当前状态不可撤单',
+  2409: '资金账户已存在',
+  2500: '交易存储操作失败',
+  2501: '交易任务执行失败',
+
+  3001: '行情快照查询请求无效',
+  3002: '分时行情查询请求无效',
+  3404: '当前标的暂无盘口快照',
+  3405: '当前标的暂无分时行情'
+};
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  const payload = (await response.json()) as ApiResponse<T>;
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch {
+    throw new Error('网络请求失败，请检查后端服务是否已启动');
+  }
+
+  let payload: ApiResponse<T>;
+  try {
+    payload = (await response.json()) as ApiResponse<T>;
+  } catch {
+    throw new Error(response.ok ? '服务器返回格式异常' : httpErrorMessage(response.status));
+  }
+
   if (!response.ok || payload.code !== 1 || payload.data === null) {
-    throw new Error(payload.msg || `request failed: ${response.status}`);
+    throw new Error(apiErrorMessage(payload.code, response.status));
   }
   return payload.data;
+}
+
+function apiErrorMessage(code: number, status: number) {
+  return API_ERROR_MESSAGES[code] ?? httpErrorMessage(status, code);
+}
+
+function httpErrorMessage(status: number, code?: number) {
+  if (status === 400) return code ? `请求参数无效（错误码 ${code}）` : '请求参数无效';
+  if (status === 404) return code ? `请求的数据不存在（错误码 ${code}）` : '请求的数据不存在';
+  if (status >= 500) return code ? `服务器处理失败（错误码 ${code}）` : '服务器处理失败';
+  return code ? `请求失败（错误码 ${code}）` : '请求失败';
 }
 
 export function getReplayStatus() {
