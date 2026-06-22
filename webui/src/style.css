@@ -115,6 +115,14 @@ body {
   flex-wrap: wrap;
 }
 
+.account-create-form {
+  margin-top: 10px;
+}
+
+.account-panel .inline-form .t-button {
+  flex: 0 0 auto;
+}
+
 .speed-row .t-input-number {
   width: 150px;
 }

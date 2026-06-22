@@ -149,6 +149,10 @@
           <t-input v-model="userId" placeholder="user_id" />
           <t-button :loading="busy.account" @click="refreshAccountAndOrders">查询</t-button>
         </div>
+        <div class="inline-form account-create-form">
+          <t-input v-model="accountForm.initial_cash" placeholder="初始资金 1000000.0000" />
+          <t-button theme="primary" :loading="busy.createAccount" @click="handleCreateAccount">创建账户</t-button>
+        </div>
         <dl class="status-grid">
           <div>
             <dt>总资金</dt>
@@ -224,6 +228,7 @@ import {
   TradingOrder,
   cancelOrder,
   connectEvents,
+  createAccount,
   createOrder,
   getAccount,
   getMarketIntraday,
@@ -286,10 +291,15 @@ const orderForm = reactive({
   qty: 100
 });
 
+const accountForm = reactive({
+  initial_cash: ''
+});
+
 const busy = reactive({
   replay: false,
   speed: false,
   account: false,
+  createAccount: false,
   order: false,
   orders: false,
   cancelOrder: false
@@ -297,15 +307,15 @@ const busy = reactive({
 
 const statusTheme = computed(() => {
   const state = replayStatus.value?.state;
-  if (state === 'Running') return 'success';
-  if (state === 'Paused') return 'warning';
-  if (state === 'Failed') return 'danger';
+  if (state === 'running') return 'success';
+  if (state === 'paused') return 'warning';
+  if (state === 'failed') return 'danger';
   return 'default';
 });
 
 const replayInputsLocked = computed(() => {
   const state = replayStatus.value?.state;
-  return Boolean(replayConfig.value?.active_replay_task) || state === 'Running' || state === 'Paused' || state === 'Stopping';
+  return Boolean(replayConfig.value?.active_replay_task) || state === 'running' || state === 'paused' || state === 'stopping';
 });
 
 const bidLevels = computed(() => padLevels(marketSnapshot.value?.bids ?? []));
@@ -379,7 +389,7 @@ const orderColumns: TableProps['columns'] = [
           size: 'small',
           theme: 'danger',
           variant: 'outline',
-          disabled: replayStatus.value?.state !== 'Running',
+          disabled: replayStatus.value?.state !== 'running',
           loading: busy.cancelOrder && cancelingOrderId.value === order.order_id,
           onClick: () => handleCancelOrder(order)
         },
@@ -702,6 +712,31 @@ async function refreshAccountAndOrders(showLoading = true) {
   } finally {
     busy.account = false;
     busy.orders = false;
+  }
+}
+
+async function handleCreateAccount() {
+  const normalizedUserId = userId.value.trim();
+  const initialCash = humanPriceToRaw(accountForm.initial_cash);
+  if (!normalizedUserId || initialCash === null) {
+    showError('请填写 user_id 和有效初始资金');
+    return;
+  }
+
+  busy.createAccount = true;
+  try {
+    const nextAccount = await createAccount({
+      user_id: normalizedUserId,
+      initial_cash: initialCash
+    });
+    account.value = nextAccount;
+    accountError.value = '';
+    orders.value = await getOrders(normalizedUserId);
+    showSuccess(`账户已创建：${nextAccount.user_id}`);
+  } catch (error) {
+    showError(error);
+  } finally {
+    busy.createAccount = false;
   }
 }
 

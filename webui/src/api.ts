@@ -4,8 +4,10 @@ export interface ApiResponse<T> {
   data: T | null;
 }
 
+export type ReplayRuntimeState = 'idle' | 'running' | 'paused' | 'stopping' | 'finished' | 'failed';
+
 export interface ReplayStatus {
-  state: string;
+  state: ReplayRuntimeState;
   current_day?: string | null;
   sim_now_ms?: number | null;
   progress?: number;
@@ -135,6 +137,10 @@ export function getMarketIntraday(code: string, fromSeq: number) {
 
 export function getAccount(userId: string) {
   return request<Account>(`/trading/accounts?user_id=${encodeURIComponent(userId)}`);
+}
+
+export function createAccount(payload: { user_id: string; initial_cash: number }) {
+  return request<Account>('/trading/accounts', jsonPost(payload));
 }
 
 export function getOrders(userId: string) {
