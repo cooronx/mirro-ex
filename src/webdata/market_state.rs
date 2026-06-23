@@ -128,15 +128,23 @@ impl MarketState {
     pub fn get(&self, code: &str) -> Option<MarketSnapshotView> {
         let snapshots = self.snapshots.read().expect("market state lock poisoned");
         let snapshot = snapshots.get(code)?;
-        Some(MarketSnapshotView {
-            code: code.to_string(),
-            timestamp_ms: snapshot.timestamp_ms,
-            last_price: snapshot.last_price,
-            auction_price: snapshot.auction_price,
-            auction_qty: snapshot.auction_qty,
-            bids: levels_to_view(&snapshot.snapshot.bids),
-            asks: levels_to_view(&snapshot.snapshot.asks),
-        })
+        Some(snapshot_to_view(code, snapshot))
+    }
+
+    pub fn recent_snapshots(&self, limit: usize) -> Vec<MarketSnapshotView> {
+        let snapshots = self.snapshots.read().expect("market state lock poisoned");
+        let mut views = snapshots
+            .iter()
+            .map(|(code, snapshot)| snapshot_to_view(code, snapshot))
+            .collect::<Vec<_>>();
+        views.sort_by(|left, right| {
+            right
+                .timestamp_ms
+                .cmp(&left.timestamp_ms)
+                .then_with(|| left.code.cmp(&right.code))
+        });
+        views.truncate(limit);
+        views
     }
 
     pub fn intraday(&self, code: &str, from_seq: u64) -> Option<MarketIntradayView> {
@@ -168,6 +176,18 @@ impl MarketState {
                 true
             }
         }
+    }
+}
+
+fn snapshot_to_view(code: &str, snapshot: &MarketSnapshot) -> MarketSnapshotView {
+    MarketSnapshotView {
+        code: code.to_string(),
+        timestamp_ms: snapshot.timestamp_ms,
+        last_price: snapshot.last_price,
+        auction_price: snapshot.auction_price,
+        auction_qty: snapshot.auction_qty,
+        bids: levels_to_view(&snapshot.snapshot.bids),
+        asks: levels_to_view(&snapshot.snapshot.asks),
     }
 }
 

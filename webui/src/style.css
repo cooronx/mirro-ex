@@ -103,6 +103,10 @@ body {
   column-gap: 12px;
 }
 
+.full-form-item {
+  grid-column: 1 / -1;
+}
+
 .button-row,
 .speed-row,
 .inline-form {
@@ -219,9 +223,110 @@ dd {
 
 .market-layout {
   display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  min-height: 455px;
+}
+
+.market-list {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e5eaf2;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.market-list-header,
+.market-detail-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.market-list-header strong,
+.market-detail-title strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.market-list-header span,
+.market-detail-title span {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.market-list-body {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.market-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #e1e7f0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  cursor: pointer;
+  text-align: left;
+}
+
+.market-list-row:hover,
+.market-list-row.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.market-list-row strong {
+  color: #0f172a;
+  font-size: 15px;
+  text-align: right;
+}
+
+.market-list-row span,
+.market-list-row em {
+  min-width: 0;
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.market-list-code {
+  color: #111827 !important;
+  font-weight: 700;
+}
+
+.market-list-empty {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+.market-detail {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+}
+
+.market-detail-layout {
+  display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
   gap: 20px;
-  min-height: 455px;
+  min-width: 0;
 }
 
 .intraday-chart {
@@ -389,7 +494,8 @@ dd {
   .grid,
   .form-grid,
   .status-grid,
-  .market-layout {
+  .market-layout,
+  .market-detail-layout {
     grid-template-columns: 1fr;
   }
 

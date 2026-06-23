@@ -16,7 +16,50 @@ export interface ReplayStatus {
   total_events?: number;
   max_lag_ms?: number;
   final_lag_ms?: number | null;
+  perf?: ReplayPerfSnapshot;
+  debug?: ReplayDebugSnapshot;
   error?: string | null;
+}
+
+export interface ReplayDebugSnapshot {
+  unfinished_lanes: ReplayLaneDebugSnapshot[];
+}
+
+export interface ReplayLaneDebugSnapshot {
+  market: string;
+  channel: number;
+  ready_events: number;
+  watermark_ms?: number | null;
+  warmed_up: boolean;
+  finished: boolean;
+}
+
+export interface ReplayPerfSnapshot {
+  last_tick_events: number;
+  last_poll_elapsed_ms: number;
+  last_handler_elapsed_ms: number;
+  last_tick_elapsed_ms: number;
+  max_poll_elapsed_ms: number;
+  max_handler_elapsed_ms: number;
+  max_tick_elapsed_ms: number;
+  last_safe_emit_time_ms?: number | null;
+  last_emitted_min_ts_ms?: number | null;
+  last_emitted_max_ts_ms?: number | null;
+  handler_detail?: ReplayHandlerPerfSnapshot | null;
+}
+
+export interface ReplayHandlerPerfSnapshot {
+  worker_count: number;
+  active_workers: number;
+  worker_max_events: number;
+  worker_max_elapsed_ms: number;
+  worker_total_elapsed_ms: number;
+  apply_elapsed_ms: number;
+  snapshot_elapsed_ms: number;
+  record_snapshot_elapsed_ms: number;
+  market_queue_elapsed_ms: number;
+  trading_init_elapsed_ms: number;
+  trading_match_elapsed_ms: number;
 }
 
 export interface ReplayStartRequest {
@@ -137,6 +180,7 @@ const API_ERROR_MESSAGES: Record<number, string> = {
 
   3001: '行情快照查询请求无效',
   3002: '分时行情查询请求无效',
+  3003: '行情列表查询请求无效',
   3404: '当前标的暂无盘口快照',
   3405: '当前标的暂无分时行情'
 };
@@ -203,6 +247,10 @@ export function setReplaySpeed(replay_speed: number) {
 
 export function getMarketSnapshot(code: string) {
   return request<MarketSnapshot>(`/market/snapshot?code=${encodeURIComponent(code)}`);
+}
+
+export function getMarketSnapshots(limit = 50) {
+  return request<MarketSnapshot[]>(`/market/snapshots?limit=${encodeURIComponent(String(limit))}`);
 }
 
 export function getMarketIntraday(code: string, fromSeq: number) {

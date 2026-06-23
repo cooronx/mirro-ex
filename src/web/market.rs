@@ -11,12 +11,17 @@ use super::common::{ApiResponse, parse_query, render_api_error_with_status};
 
 const MARKET_INVALID_SNAPSHOT_QUERY_CODE: i32 = 3001;
 const MARKET_INVALID_INTRADAY_QUERY_CODE: i32 = 3002;
+const MARKET_INVALID_SNAPSHOTS_QUERY_CODE: i32 = 3003;
 const MARKET_SNAPSHOT_NOT_FOUND_CODE: i32 = 3404;
 const MARKET_INTRADAY_NOT_FOUND_CODE: i32 = 3405;
+const DEFAULT_RECENT_SNAPSHOT_LIMIT: usize = 50;
 
 pub fn router(market_state: MarketState) -> Router {
     let market_state = Arc::new(market_state);
     Router::with_path("market")
+        .push(Router::with_path("snapshots").get(GetSnapshotsHandler {
+            market_state: market_state.clone(),
+        }))
         .push(Router::with_path("snapshot").get(GetSnapshotHandler {
             market_state: market_state.clone(),
         }))
@@ -35,12 +40,47 @@ struct IntradayQuery {
     from_seq: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct SnapshotsQuery {
+    #[serde(default = "default_recent_snapshot_limit")]
+    limit: usize,
+}
+
 struct GetSnapshotHandler {
+    market_state: Arc<MarketState>,
+}
+
+struct GetSnapshotsHandler {
     market_state: Arc<MarketState>,
 }
 
 struct GetIntradayHandler {
     market_state: Arc<MarketState>,
+}
+
+#[async_trait]
+impl Handler for GetSnapshotsHandler {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        _depot: &mut Depot,
+        res: &mut Response,
+        _ctrl: &mut FlowCtrl,
+    ) {
+        let Some(query) = parse_query::<SnapshotsQuery>(
+            req,
+            res,
+            MARKET_INVALID_SNAPSHOTS_QUERY_CODE,
+            "invalid market snapshots query",
+        ) else {
+            return;
+        };
+
+        let limit = query.limit.min(DEFAULT_RECENT_SNAPSHOT_LIMIT);
+        res.render(Json(ApiResponse::success(
+            self.market_state.recent_snapshots(limit),
+        )));
+    }
 }
 
 #[async_trait]
@@ -82,6 +122,10 @@ impl Handler for GetSnapshotHandler {
             ),
         }
     }
+}
+
+fn default_recent_snapshot_limit() -> usize {
+    DEFAULT_RECENT_SNAPSHOT_LIMIT
 }
 
 #[async_trait]

@@ -6,7 +6,6 @@
         <p>回放交易控制台</p>
       </div>
       <div class="topbar-controls">
-        <t-input v-model="code" class="code-input" :disabled="replayInputsLocked" placeholder="标的代码，例如 300274.XSHE" />
         <t-tag :theme="statusTheme" variant="light">{{ replayStatus?.state ?? 'Unknown' }}</t-tag>
       </div>
     </header>
@@ -14,6 +13,14 @@
     <section class="grid">
       <t-card title="回放控制" bordered class="panel replay-panel">
         <t-form label-align="top" class="form-grid">
+          <t-form-item label="回放标的" class="full-form-item">
+            <t-textarea
+              v-model="replayCodesInput"
+              :disabled="replayInputsLocked"
+              :autosize="{ minRows: 2, maxRows: 4 }"
+              placeholder="多个代码用逗号、空格或换行分隔；留空播放全部"
+            />
+          </t-form-item>
           <t-form-item label="开始日期">
             <t-date-picker
               v-model="replayForm.replay_start_date"
@@ -102,41 +109,79 @@
 
       <t-card title="行情" bordered class="panel market-panel">
         <div class="market-layout">
-          <div class="intraday-chart">
-            <div class="chart-header">
-              <div>
-                <dt>最新价</dt>
-                <dd>{{ formatPrice(displayPrice) }}</dd>
-              </div>
+          <aside class="market-list">
+            <div class="market-list-header">
+              <strong>最近活跃 {{ activeSnapshots.length }}</strong>
+              <span>最多 50</span>
+            </div>
+            <t-input
+              v-model="marketFilter"
+              clearable
+              placeholder="搜索或输入标的代码"
+              @enter="handleMarketSearchEnter"
+            />
+            <div class="market-list-body">
+              <button
+                v-for="snapshot in filteredActiveSnapshots"
+                :key="snapshot.code"
+                type="button"
+                class="market-list-row"
+                :class="{ active: snapshot.code === selectedCode }"
+                @click="selectMarketCode(snapshot.code)"
+              >
+                <span class="market-list-code">{{ snapshot.code }}</span>
+                <strong>{{ formatPrice(snapshotDisplayPrice(snapshot)) }}</strong>
+                <span>买一 {{ formatPrice(snapshot.bids[0]?.price) }} / {{ snapshot.bids[0]?.qty ?? '-' }}</span>
+                <span>卖一 {{ formatPrice(snapshot.asks[0]?.price) }} / {{ snapshot.asks[0]?.qty ?? '-' }}</span>
+                <em>{{ formatTimeOnly(snapshot.timestamp_ms) }}</em>
+              </button>
+              <div v-if="filteredActiveSnapshots.length === 0" class="market-list-empty">暂无活跃标的</div>
+            </div>
+          </aside>
+
+          <div class="market-detail">
+            <div class="market-detail-title">
+              <strong>{{ selectedCode || '未选择标的' }}</strong>
               <span>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</span>
             </div>
-            <div ref="chartContainer" class="price-chart">
-              <div v-if="chartPoints.length === 0" class="chart-empty">暂无日内成交价格</div>
-            </div>
-            <div class="chart-axis">
-              <span>{{ formatTimeOnly(chartStartTime) }}</span>
-              <span>{{ chartPriceRange }}</span>
-              <span>{{ formatTimeOnly(chartEndTime) }}</span>
-            </div>
-          </div>
-
-          <div class="orderbook">
-            <div class="orderbook-title">五档盘口</div>
-            <div class="book-side asks">
-              <div v-for="(level, index) in askLevels" :key="`ask-${index}`" class="book-row ask-row">
-                <span>卖{{ 5 - index }}</span>
-                <strong>{{ formatPrice(level?.price) }}</strong>
-                <em>{{ level?.qty ?? '-' }}</em>
+            <div class="market-detail-layout">
+              <div class="intraday-chart">
+                <div class="chart-header">
+                  <div>
+                    <dt>最新价</dt>
+                    <dd>{{ formatPrice(displayPrice) }}</dd>
+                  </div>
+                  <span>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</span>
+                </div>
+                <div ref="chartContainer" class="price-chart">
+                  <div v-if="chartPoints.length === 0" class="chart-empty">暂无日内成交价格</div>
+                </div>
+                <div class="chart-axis">
+                  <span>{{ formatTimeOnly(chartStartTime) }}</span>
+                  <span>{{ chartPriceRange }}</span>
+                  <span>{{ formatTimeOnly(chartEndTime) }}</span>
+                </div>
               </div>
-            </div>
-            <div class="last-price">
-              {{ formatPrice(displayPrice) }}
-            </div>
-            <div class="book-side bids">
-              <div v-for="(level, index) in bidLevels" :key="`bid-${index}`" class="book-row bid-row">
-                <span>买{{ index + 1 }}</span>
-                <strong>{{ formatPrice(level?.price) }}</strong>
-                <em>{{ level?.qty ?? '-' }}</em>
+
+              <div class="orderbook">
+                <div class="orderbook-title">五档盘口</div>
+                <div class="book-side asks">
+                  <div v-for="(level, index) in askLevels" :key="`ask-${index}`" class="book-row ask-row">
+                    <span>卖{{ 5 - index }}</span>
+                    <strong>{{ formatPrice(level?.price) }}</strong>
+                    <em>{{ level?.qty ?? '-' }}</em>
+                  </div>
+                </div>
+                <div class="last-price">
+                  {{ formatPrice(displayPrice) }}
+                </div>
+                <div class="book-side bids">
+                  <div v-for="(level, index) in bidLevels" :key="`bid-${index}`" class="book-row bid-row">
+                    <span>买{{ index + 1 }}</span>
+                    <strong>{{ formatPrice(level?.price) }}</strong>
+                    <em>{{ level?.qty ?? '-' }}</em>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -245,6 +290,7 @@ import {
   getAccount,
   getMarketIntraday,
   getMarketSnapshot,
+  getMarketSnapshots,
   getOrders,
   getPositions,
   getReplayConfig,
@@ -257,12 +303,16 @@ import {
 } from './api';
 
 const INTRADAY_BUCKET_MS = 3_000;
+const MARKET_SNAPSHOT_LIMIT = 50;
 
-const code = ref('');
+const replayCodesInput = ref('');
+const selectedCode = ref('');
+const marketFilter = ref('');
 const userId = ref('');
 const replayStatus = ref<ReplayStatus | null>(null);
 const replayConfig = ref<ReplayConfig | null>(null);
 const marketSnapshot = ref<MarketSnapshot | null>(null);
+const activeSnapshots = ref<MarketSnapshot[]>([]);
 const marketError = ref('');
 const account = ref<Account | null>(null);
 const accountError = ref('');
@@ -278,6 +328,7 @@ let lineSeries: ISeriesApi<'Line'> | null = null;
 let chartResizeObserver: ResizeObserver | null = null;
 let eventSource: EventSource | null = null;
 let replayRefreshTimer: number | null = null;
+let marketSnapshotsRefreshTimer: number | null = null;
 let marketRefreshTimer: number | null = null;
 let tradingRefreshTimer: number | null = null;
 let pendingReplayConfigRefresh = false;
@@ -336,8 +387,13 @@ const replayInputsLocked = computed(() => {
 const bidLevels = computed(() => padLevels(marketSnapshot.value?.bids ?? []));
 const askLevels = computed(() => padLevels(marketSnapshot.value?.asks ?? []).reverse());
 const displayPrice = computed(() => marketSnapshot.value?.auction_price ?? marketSnapshot.value?.last_price ?? null);
+const filteredActiveSnapshots = computed(() => {
+  const keyword = marketFilter.value.trim().toUpperCase();
+  if (!keyword) return activeSnapshots.value;
+  return activeSnapshots.value.filter((snapshot) => snapshot.code.toUpperCase().includes(keyword));
+});
 
-const chartPoints = computed(() => intradayCaches[code.value.trim()]?.points ?? []);
+const chartPoints = computed(() => intradayCaches[selectedCode.value.trim()]?.points ?? []);
 const chartStartTime = computed(() => chartPoints.value[0]?.timestamp_ms ?? null);
 const chartEndTime = computed(() => chartPoints.value[chartPoints.value.length - 1]?.timestamp_ms ?? null);
 const chartPriceRange = computed(() => {
@@ -469,7 +525,7 @@ watch(chartPoints, () => {
   updatePriceChart();
 });
 
-watch(code, () => {
+watch(selectedCode, () => {
   marketSnapshot.value = null;
   marketError.value = '';
   updatePriceChart();
@@ -479,6 +535,7 @@ watch(code, () => {
 async function refreshAll() {
   await refreshReplayStatus();
   await refreshReplayConfig();
+  await refreshMarketSnapshots();
   await refreshMarket();
   if (userId.value.trim()) {
     await refreshAccountAndOrders(false);
@@ -491,13 +548,15 @@ function connectEventStream() {
   eventSource.addEventListener('replay_changed', (event) => {
     if (!parseAppEvent(event)) return;
     scheduleReplayRefresh(true);
-    scheduleMarketRefresh();
+    scheduleMarketSnapshotsRefresh();
   });
   eventSource.addEventListener('market_changed', (event) => {
     const payload = parseAppEvent(event);
     if (!payload || payload.type !== 'market_changed') return;
-    if (payload.code.trim() !== code.value.trim()) return;
-    scheduleMarketRefresh();
+    scheduleMarketSnapshotsRefresh();
+    if (payload.code.trim() === selectedCode.value.trim()) {
+      scheduleMarketRefresh();
+    }
     scheduleReplayRefresh(false);
   });
   eventSource.addEventListener('trading_changed', (event) => {
@@ -548,6 +607,14 @@ function scheduleMarketRefresh() {
   }, 250);
 }
 
+function scheduleMarketSnapshotsRefresh() {
+  if (marketSnapshotsRefreshTimer !== null) return;
+  marketSnapshotsRefreshTimer = window.setTimeout(async () => {
+    marketSnapshotsRefreshTimer = null;
+    await refreshMarketSnapshots();
+  }, 400);
+}
+
 function scheduleTradingRefresh() {
   if (tradingRefreshTimer !== null) return;
   tradingRefreshTimer = window.setTimeout(async () => {
@@ -560,9 +627,11 @@ function scheduleTradingRefresh() {
 
 function clearScheduledRefreshes() {
   if (replayRefreshTimer !== null) window.clearTimeout(replayRefreshTimer);
+  if (marketSnapshotsRefreshTimer !== null) window.clearTimeout(marketSnapshotsRefreshTimer);
   if (marketRefreshTimer !== null) window.clearTimeout(marketRefreshTimer);
   if (tradingRefreshTimer !== null) window.clearTimeout(tradingRefreshTimer);
   replayRefreshTimer = null;
+  marketSnapshotsRefreshTimer = null;
   marketRefreshTimer = null;
   tradingRefreshTimer = null;
   pendingReplayConfigRefresh = false;
@@ -595,14 +664,15 @@ function applyActiveReplayTask(task: ReplayConfig['active_replay_task']) {
   replayForm.replay_speed = task.replay_speed;
   replayForm.skip_intraday_breaks = task.skip_intraday_breaks;
   speedValue.value = task.replay_speed;
+  replayCodesInput.value = task.replay_codes.join('\n');
 
-  if (task.replay_codes.length > 0) {
-    code.value = task.replay_codes[0];
+  if (!selectedCode.value && task.replay_codes.length > 0) {
+    selectedCode.value = task.replay_codes[0];
   }
 }
 
 async function refreshMarket() {
-  const normalizedCode = code.value.trim();
+  const normalizedCode = selectedCode.value.trim();
   const requestSeq = ++marketRequestSeq;
   if (!normalizedCode) {
     marketSnapshot.value = null;
@@ -612,14 +682,29 @@ async function refreshMarket() {
   try {
     const snapshot = await getMarketSnapshot(normalizedCode);
     if (requestSeq !== marketRequestSeq) return;
-    if (code.value.trim() !== normalizedCode) return;
+    if (selectedCode.value.trim() !== normalizedCode) return;
     marketSnapshot.value = snapshot;
     marketError.value = '';
+    upsertActiveSnapshot(snapshot);
     await refreshIntraday(normalizedCode, requestSeq);
   } catch (error) {
     if (requestSeq !== marketRequestSeq) return;
-    if (code.value.trim() !== normalizedCode) return;
+    if (selectedCode.value.trim() !== normalizedCode) return;
     marketSnapshot.value = null;
+    marketError.value = messageOf(error);
+  }
+}
+
+async function refreshMarketSnapshots() {
+  try {
+    activeSnapshots.value = mergeStableSnapshots(
+      activeSnapshots.value,
+      await getMarketSnapshots(MARKET_SNAPSHOT_LIMIT)
+    );
+    if (!selectedCode.value && activeSnapshots.value.length > 0) {
+      selectedCode.value = activeSnapshots.value[0].code;
+    }
+  } catch (error) {
     marketError.value = messageOf(error);
   }
 }
@@ -628,7 +713,7 @@ async function refreshIntraday(normalizedCode: string, requestSeq?: number) {
   const cache = intradayCaches[normalizedCode] ?? { points: [], nextSeq: 0 };
   const intraday = await getMarketIntraday(normalizedCode, cache.nextSeq);
   if (requestSeq !== undefined && requestSeq !== marketRequestSeq) return;
-  if (code.value.trim() !== normalizedCode) return;
+  if (selectedCode.value.trim() !== normalizedCode) return;
   intradayCaches[normalizedCode] = mergeIntraday(cache, intraday);
 }
 
@@ -802,9 +887,8 @@ async function handleCreateAccount() {
 }
 
 async function handleStartReplay() {
-  const normalizedCode = code.value.trim();
+  const replayCodes = parseReplayCodes(replayCodesInput.value);
   const missing = requiredReplayFields();
-  if (!normalizedCode) missing.push('标的代码');
   if (missing.length > 0) {
     showError(`请填写：${missing.join('、')}`);
     return;
@@ -816,11 +900,11 @@ async function handleStartReplay() {
       replay_end_date: replayForm.replay_end_date.trim(),
       replay_start_time: replayForm.replay_start_time.trim(),
       replay_end_time: replayForm.replay_end_time.trim(),
-      replay_codes: [normalizedCode],
+      replay_codes: replayCodes,
       replay_speed: Number(replayForm.replay_speed),
       skip_intraday_breaks: replayForm.skip_intraday_breaks
     });
-    resetMarketView(normalizedCode);
+    resetMarketViewForReplayStart(replayCodes);
     await refreshReplayConfig();
     showSuccess('回放已开始');
   } catch (error) {
@@ -830,13 +914,14 @@ async function handleStartReplay() {
   }
 }
 
-function resetMarketView(normalizedCode?: string) {
-  const nextCode = normalizedCode ?? code.value.trim();
+function resetMarketViewForReplayStart(replayCodes: string[]) {
   marketRequestSeq += 1;
+  activeSnapshots.value = [];
+  selectedCode.value = replayCodes[0] ?? '';
   marketSnapshot.value = null;
   marketError.value = '';
-  if (nextCode) {
-    delete intradayCaches[nextCode];
+  for (const cacheKey of Object.keys(intradayCaches)) {
+    delete intradayCaches[cacheKey];
   }
   updatePriceChart();
 }
@@ -875,11 +960,11 @@ async function handleSetSpeed() {
 
 async function handleCreateOrder() {
   const normalizedUserId = userId.value.trim();
-  const normalizedCode = code.value.trim();
+  const normalizedCode = selectedCode.value.trim();
   const price = humanPriceToRaw(orderForm.price);
   orderMessage.value = '';
   if (!normalizedUserId || !normalizedCode || price === null || !orderForm.qty) {
-    showError('请填写 user_id、标的代码、价格和数量');
+    showError('请填写 user_id、选择标的、价格和数量');
     return;
   }
 
@@ -943,6 +1028,60 @@ function requiredReplayFields() {
     fields.push('回放速度');
   }
   return fields;
+}
+
+function parseReplayCodes(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/[\s,，;；]+/)
+    .map((code) => code.trim())
+    .filter(Boolean)
+    .filter((code) => {
+      const key = code.toUpperCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function selectMarketCode(nextCode: string) {
+  const normalizedCode = nextCode.trim();
+  if (!normalizedCode) return;
+  selectedCode.value = normalizedCode;
+}
+
+async function handleMarketSearchEnter() {
+  const normalizedCode = marketFilter.value.trim();
+  if (!normalizedCode) return;
+  selectMarketCode(normalizedCode);
+}
+
+function upsertActiveSnapshot(snapshot: MarketSnapshot) {
+  activeSnapshots.value = mergeStableSnapshots(activeSnapshots.value, [snapshot]);
+}
+
+function mergeStableSnapshots(current: MarketSnapshot[], incoming: MarketSnapshot[]) {
+  const nextSnapshots = [...current];
+  const knownCodes = new Set(nextSnapshots.map((snapshot) => snapshot.code));
+
+  for (const snapshot of incoming) {
+    const existingIndex = nextSnapshots.findIndex((item) => item.code === snapshot.code);
+    if (existingIndex >= 0) {
+      nextSnapshots[existingIndex] = snapshot;
+      continue;
+    }
+    if (nextSnapshots.length >= MARKET_SNAPSHOT_LIMIT || knownCodes.has(snapshot.code)) {
+      continue;
+    }
+    knownCodes.add(snapshot.code);
+    nextSnapshots.push(snapshot);
+  }
+
+  return nextSnapshots;
+}
+
+function snapshotDisplayPrice(snapshot: MarketSnapshot) {
+  return snapshot.auction_price ?? snapshot.last_price ?? null;
 }
 
 function isCancelableOrder(order: TradingOrder) {
