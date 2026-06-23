@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use thiserror::Error;
 use tokio::sync::mpsc::error::TryRecvError;
 
+use crate::replay::controller::{ReplayDebugSnapshot, ReplayLaneDebugSnapshot};
 use crate::sim_clock::{SimClock, SimClockError};
 
 use super::db_reader::ReplayDbReader;
@@ -185,6 +186,26 @@ impl ReplayCoordinator {
             .all(|lane_runtime| lane_runtime.finished && lane_runtime.ready_events.is_empty())
     }
 
+    pub fn debug_snapshot(&self) -> ReplayDebugSnapshot {
+        ReplayDebugSnapshot {
+            unfinished_lanes: self
+                .lanes
+                .iter()
+                .filter(|(_, lane_runtime)| {
+                    !lane_runtime.finished || !lane_runtime.ready_events.is_empty()
+                })
+                .map(|(lane_key, lane_runtime)| ReplayLaneDebugSnapshot {
+                    market: format!("{:?}", lane_key.market),
+                    channel: lane_key.channel,
+                    ready_events: lane_runtime.ready_events.len(),
+                    watermark_ms: lane_runtime.watermark_ms,
+                    warmed_up: lane_runtime.warmed_up,
+                    finished: lane_runtime.finished,
+                })
+                .collect(),
+        }
+    }
+
     pub async fn bootstrap(&mut self) -> Result<()> {
         self.bootstrap_impl().await
     }
@@ -329,7 +350,7 @@ impl ReplayCoordinator {
         let mut min_upper_bound: Option<i64> = None;
 
         for lane_runtime in self.lanes.values() {
-            if lane_runtime.finished && lane_runtime.ready_events.is_empty() {
+            if lane_runtime.finished {
                 continue;
             }
 
@@ -343,7 +364,7 @@ impl ReplayCoordinator {
             });
         }
 
-        min_upper_bound.or(self.last_emitted_timestamp_ms)
+        min_upper_bound.or(Some(i64::MAX))
     }
 
     fn emit_events_until(&mut self, emit_until: Option<i64>) -> Vec<ReplayEvent> {

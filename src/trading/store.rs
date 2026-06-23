@@ -25,7 +25,8 @@ use super::model::{
     STATUS_PARTIALLY_FILLED, STATUS_WORKING, TradingOrder,
 };
 use super::util::{
-    FILL_COUNTER, ORDER_COUNTER, checked_amount, current_unix_timestamp_ms, next_id, normalize_side,
+    FILL_COUNTER, ORDER_ACTIVITY_EPOCH, ORDER_COUNTER, checked_amount, current_unix_timestamp_ms,
+    next_id, normalize_side,
 };
 
 #[derive(Clone)]
@@ -183,6 +184,7 @@ impl TradingStore {
                 source,
             })?;
 
+        bump_order_activity_epoch();
         self.publish_trading_changed(Some(order.user_id.clone()));
         Ok(order)
     }
@@ -322,8 +324,13 @@ impl TradingStore {
                 source,
             })?;
 
+        bump_order_activity_epoch();
         self.publish_trading_changed(Some(canceled_order.user_id.clone()));
         Ok(canceled_order)
+    }
+
+    pub fn order_activity_epoch(&self) -> u64 {
+        ORDER_ACTIVITY_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn new_limit_orders(&self, code: &str) -> StoreResult<Vec<TradingOrder>> {
@@ -505,6 +512,10 @@ impl TradingStore {
             event_bus.publish(AppEvent::TradingChanged { user_id });
         }
     }
+}
+
+fn bump_order_activity_epoch() {
+    ORDER_ACTIVITY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn is_cancelable_status(status: &str) -> bool {

@@ -8,8 +8,8 @@ use crate::config::AppConfig;
 use crate::orderbook_worker::OrderBookWorkerPool;
 use crate::publisher::NatsDispatcher;
 use crate::replay::{
-    ReplayControl, ReplayController, ReplayEvent, ReplayHandler, ReplayRunReport,
-    ReplayStatusReporter,
+    ReplayControl, ReplayController, ReplayEvent, ReplayHandler, ReplayHandlerPerfSnapshot,
+    ReplayRunReport, ReplayStatusReporter,
 };
 use crate::replay_manager::ReplayTaskConfig;
 use crate::trading::{TradingStore, trading_db_path_from_config};
@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 struct OrderBookSnapshotHandler {
     workers: OrderBookWorkerPool,
     _dispatcher: NatsDispatcher,
+    last_perf: Option<ReplayHandlerPerfSnapshot>,
 }
 
 impl OrderBookSnapshotHandler {
@@ -44,6 +45,7 @@ impl OrderBookSnapshotHandler {
                 market_state,
             )?,
             _dispatcher: dispatcher,
+            last_perf: None,
         })
     }
 }
@@ -57,7 +59,12 @@ impl ReplayHandler for OrderBookSnapshotHandler {
     }
 
     async fn on_events(&mut self, events: Vec<ReplayEvent>) -> anyhow::Result<()> {
-        self.workers.process_events(events).await
+        self.last_perf = Some(self.workers.process_events(events).await?);
+        Ok(())
+    }
+
+    fn last_perf_snapshot(&self) -> Option<ReplayHandlerPerfSnapshot> {
+        self.last_perf.clone()
     }
 
     async fn on_day_end(&mut self, day: &str) -> anyhow::Result<()> {

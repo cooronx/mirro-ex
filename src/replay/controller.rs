@@ -72,8 +72,55 @@ pub struct ReplayStatusSnapshot {
     pub total_events: usize,
     pub max_lag_ms: u64,
     pub final_lag_ms: Option<u64>,
+    pub perf: ReplayPerfSnapshot,
+    pub debug: ReplayDebugSnapshot,
     pub error_message: Option<String>,
     pub report: Option<ReplayRunReport>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ReplayPerfSnapshot {
+    pub last_tick_events: usize,
+    pub last_poll_elapsed_ms: u128,
+    pub last_handler_elapsed_ms: u128,
+    pub last_tick_elapsed_ms: u128,
+    pub max_poll_elapsed_ms: u128,
+    pub max_handler_elapsed_ms: u128,
+    pub max_tick_elapsed_ms: u128,
+    pub last_safe_emit_time_ms: Option<i64>,
+    pub last_emitted_min_ts_ms: Option<i64>,
+    pub last_emitted_max_ts_ms: Option<i64>,
+    pub handler_detail: Option<ReplayHandlerPerfSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ReplayHandlerPerfSnapshot {
+    pub worker_count: usize,
+    pub active_workers: usize,
+    pub worker_max_events: usize,
+    pub worker_max_elapsed_ms: u128,
+    pub worker_total_elapsed_ms: u128,
+    pub apply_elapsed_ms: u128,
+    pub snapshot_elapsed_ms: u128,
+    pub record_snapshot_elapsed_ms: u128,
+    pub market_queue_elapsed_ms: u128,
+    pub trading_init_elapsed_ms: u128,
+    pub trading_match_elapsed_ms: u128,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ReplayDebugSnapshot {
+    pub unfinished_lanes: Vec<ReplayLaneDebugSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReplayLaneDebugSnapshot {
+    pub market: String,
+    pub channel: i64,
+    pub ready_events: usize,
+    pub watermark_ms: Option<i64>,
+    pub warmed_up: bool,
+    pub finished: bool,
 }
 
 impl Default for ReplayStatusSnapshot {
@@ -88,6 +135,8 @@ impl Default for ReplayStatusSnapshot {
             total_events: 0,
             max_lag_ms: 0,
             final_lag_ms: None,
+            perf: ReplayPerfSnapshot::default(),
+            debug: ReplayDebugSnapshot::default(),
             error_message: None,
             report: None,
         }
@@ -134,6 +183,8 @@ impl ReplayStatusReporter {
         max_lag_ms: u64,
         final_lag_ms: u64,
         replay_speed: f64,
+        perf: ReplayPerfSnapshot,
+        debug: ReplayDebugSnapshot,
     ) {
         let mut guard = self.status.write().await;
         guard.state = ReplayRuntimeState::Running;
@@ -145,6 +196,8 @@ impl ReplayStatusReporter {
         guard.total_events = total_events;
         guard.max_lag_ms = max_lag_ms;
         guard.final_lag_ms = Some(final_lag_ms);
+        guard.perf = perf;
+        guard.debug = debug;
         guard.error_message = None;
     }
 
@@ -283,6 +336,10 @@ pub trait ReplayHandler: Send {
     }
 
     async fn on_events(&mut self, events: Vec<ReplayEvent>) -> anyhow::Result<()>;
+
+    fn last_perf_snapshot(&self) -> Option<ReplayHandlerPerfSnapshot> {
+        None
+    }
 
     async fn on_day_end(&mut self, _day: &str) -> anyhow::Result<()> {
         Ok(())
@@ -571,6 +628,9 @@ impl ReplayController {
         let mut max_lag_ms = 0u64;
         let mut total_lag_ms = 0u128;
         let mut final_lag_ms = None;
+        let mut max_poll_elapsed_ms = 0u128;
+        let mut max_handler_elapsed_ms = 0u128;
+        let mut max_tick_elapsed_ms = 0u128;
         let mut stopped = false;
         let mut replay_speed = self.replay_task_config.replay_speed;
         loop {
@@ -594,14 +654,45 @@ impl ReplayController {
             }
 
             tick.tick().await;
+            let tick_process_start = Instant::now();
+            let poll_start = Instant::now();
             let result = coordinator.poll_ready_events().await?;
+            let poll_elapsed_ms = poll_start.elapsed().as_millis();
             tick_count += 1;
             max_lag_ms = max_lag_ms.max(result.lag_ms);
             total_lag_ms += u128::from(result.lag_ms);
             final_lag_ms = Some(result.lag_ms);
+            max_poll_elapsed_ms = max_poll_elapsed_ms.max(poll_elapsed_ms);
 
-            if let Some(control) = control.as_mut() {
-                let progress = coordinator.progress()?;
+            let tick_events = result.events.len();
+            let emitted_min_ts_ms = result.events.iter().map(ReplayEvent::timestamp_ms).min();
+            let emitted_max_ts_ms = result.events.iter().map(ReplayEvent::timestamp_ms).max();
+
+            let progress = if control.is_some() {
+                Some(coordinator.progress()?)
+            } else {
+                None
+            };
+            let mut handler_elapsed_ms = 0;
+            let (order_rows, transaction_rows) = count_event_rows(&result.events);
+            total_events += result.events.len();
+            total_order_rows += order_rows;
+            total_transaction_rows += transaction_rows;
+
+            if !result.events.is_empty() {
+                let handler_start = Instant::now();
+                handler
+                    .on_events(result.events)
+                    .await
+                    .map_err(ReplayControllerError::Handler)?;
+                handler_elapsed_ms = handler_start.elapsed().as_millis();
+            }
+            let handler_detail = handler.last_perf_snapshot();
+            max_handler_elapsed_ms = max_handler_elapsed_ms.max(handler_elapsed_ms);
+            let tick_elapsed_ms = tick_process_start.elapsed().as_millis();
+            max_tick_elapsed_ms = max_tick_elapsed_ms.max(tick_elapsed_ms);
+
+            if let (Some(control), Some(progress)) = (control.as_mut(), progress) {
                 control
                     .status_reporter
                     .update_running(
@@ -609,24 +700,26 @@ impl ReplayController {
                         result.sim_now_ms,
                         progress,
                         tick_count,
-                        total_events + result.events.len(),
+                        total_events,
                         max_lag_ms,
                         result.lag_ms,
                         replay_speed,
+                        ReplayPerfSnapshot {
+                            last_tick_events: tick_events,
+                            last_poll_elapsed_ms: poll_elapsed_ms,
+                            last_handler_elapsed_ms: handler_elapsed_ms,
+                            last_tick_elapsed_ms: tick_elapsed_ms,
+                            max_poll_elapsed_ms,
+                            max_handler_elapsed_ms,
+                            max_tick_elapsed_ms,
+                            last_safe_emit_time_ms: result.safe_emit_time_ms,
+                            last_emitted_min_ts_ms: emitted_min_ts_ms,
+                            last_emitted_max_ts_ms: emitted_max_ts_ms,
+                            handler_detail,
+                        },
+                        coordinator.debug_snapshot(),
                     )
                     .await;
-            }
-
-            let (order_rows, transaction_rows) = count_event_rows(&result.events);
-            total_events += result.events.len();
-            total_order_rows += order_rows;
-            total_transaction_rows += transaction_rows;
-
-            if !result.events.is_empty() {
-                handler
-                    .on_events(result.events)
-                    .await
-                    .map_err(ReplayControllerError::Handler)?;
             }
 
             if result.finished {
@@ -712,6 +805,8 @@ impl ReplayController {
                                         max_lag_ms,
                                         final_lag_ms.unwrap_or(0),
                                         *replay_speed,
+                                        ReplayPerfSnapshot::default(),
+                                        ReplayDebugSnapshot::default(),
                                     )
                                     .await;
                                 break;
@@ -774,6 +869,8 @@ impl ReplayController {
                             max_lag_ms,
                             final_lag_ms.unwrap_or(0),
                             *replay_speed,
+                            ReplayPerfSnapshot::default(),
+                            ReplayDebugSnapshot::default(),
                         )
                         .await;
                 }

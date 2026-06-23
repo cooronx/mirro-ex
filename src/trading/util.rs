@@ -9,6 +9,7 @@ use super::model::{SIDE_BUY, SIDE_SELL};
 
 pub(super) static ORDER_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub(super) static FILL_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub(super) static ORDER_ACTIVITY_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn normalize_side(side: &str) -> StoreResult<String> {
     match side.trim().to_ascii_lowercase().as_str() {
