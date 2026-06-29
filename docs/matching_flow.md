@@ -1,11 +1,23 @@
 # 撮合流程简述
 
-我们这里说的“撮合”主要是按逐笔委托、逐笔成交去重建盘口，然后用盘口去驱动快照和模拟单成交。
+这里说的“撮合”主要是按逐笔委托、逐笔成交去重建盘口，然后用盘口去驱动快照和模拟单成交。
 
 大致来讲的流程就是：
 1. 收到委托挂入orderbook
 2. 后续成交消去
 3. 定期产出snapshot
+
+
+为了实现快速的撮合，我参考了github上现有的orderbook设计 [HFT-Orderbook](https://github.com/Crypto-toolbox/HFT-Orderbook)
+- 买卖盘双方都使用了一个平衡二叉树（有些地方的设计是红黑树，rust里面是B树）
+- 用一个hashmap维护所有的订单，其中二叉树的叶子节点的value就是hashmap的key（OrderId）
+- add新增订单操作本质上就是插入平衡二叉树，所以时间复杂度是O(logN)，其中N是总共的价格挡位
+- cancel撤单操作实际上是删除掉hash表中的一项,并且更新价位，所以也是O(logN)
+- getBestBid / getBestOffer (最优价位) 这个本质上就是求平衡二叉树的头尾，可以近似看作O(1)来处理
+
+![原理图](concept.png)
+
+
 
 核心代码在 `src/matcher/order_book.rs`。
 
@@ -156,7 +168,7 @@ fn process_shenzhen_trade(&mut self, transaction: &L2Transaction) {
 }
 ```
 
-如果成交打到的是 holding 市价单：
+如果成交打的是 holding 市价单：
 
 - 第一次打到它时，记下首次成交价
 - 标记这笔市价单已经实际发生过成交
@@ -200,7 +212,7 @@ self.insert_visible_order(visible_order)?;
 
 ## 4. 上海部分成交怎么处理
 
-沪市这里没有单独的“部分成交状态机”，就是正常扣减可见单。
+沪市这里没有单独的去处理部分成交，就是正常扣减可见单。
 
 核心逻辑：
 
@@ -229,6 +241,7 @@ fn reduce_visible_order(&mut self, order_id: OrderId, qty: i64) -> Option<i64> {
         self.decrement_level_order_count(side, price);
     }
 
+    // 扣减对应的挂单量
     self.adjust_level_total_qty(side, price, reduced_qty);
     self.remove_empty_level_if_drained(side, price);
     Some(reduced_qty)
@@ -244,107 +257,22 @@ fn reduce_visible_order(&mut self, order_id: OrderId, qty: i64) -> Option<i64> {
 
 没有额外分支。
 
-## 5. 上海成交先于委托怎么处理
+## 5. 集合竞价
 
-这是沪深差异里比较关键的一点。
+### 虚拟撮合价的计算
 
-### 深市
+集合竞价的虚拟撮合价，是在当前买卖盘上枚举所有可能成交的价格，然后对每个价格分别计算“该价及以上的累计买量”和“该
+  价及以下的累计卖量”，两者较小值就是这个价格下的可成交量。
+  
+  最终优先选择可成交量最大的价格；如果有多个价格并列，再
+  选未成交量最小的；
+  
+  如果还并列，则优先取最接近最新成交价的那个价格，如果没有最新成交价，就取中间价。这个价格就是当
+  前实现里的集合竞价虚拟撮合价。
 
-深市允许先看到成交、后看到委托。找不到单时，会先把扣减量记到 `pending_reductions`：
+  不过沪深交易所在细节上有一点不一致，目前我还没有实现的完全贴近交易所的虚拟成交价规则（主要是深市要用到前一天的收盘价来算，我这边不太方便拿到这个数据）[深交所交易规则](https://docs.static.szse.cn/www/lawrules/index/rule/W020230217564423808793.pdf) [上交所交易规则](https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20250519_10779396.shtml)
 
-```rust
-fn reduce_order(&mut self, order_id: OrderId, matched_qty: i64) -> i64 {
-    if let Some(reduced_qty) = self.reduce_visible_order(order_id, matched_qty) {
-        return reduced_qty;
-    }
-
-    self.pending_reductions
-        .entry(order_id)
-        .and_modify(|value| *value = value.saturating_add(matched_qty))
-        .or_insert(matched_qty);
-    0
-}
-```
-
-等对应委托真的到达时，再在 `apply_pending_to_order()` 里补扣：
-
-```rust
-fn apply_pending_to_order(&mut self, order_id: OrderId, order: &mut L2Order) -> Result<bool> {
-    let pending_cancel = self.pending_cancels.remove(&order_id).unwrap_or(0);
-    let pending_reduction = if order.market == Market::XSHG {
-        0
-    } else {
-        self.pending_reductions.remove(&order_id).unwrap_or(0)
-    };
-    let total_pending = pending_cancel.saturating_add(pending_reduction);
-
-    if total_pending > 0 && total_pending >= order.volume {
-        return Ok(true);
-    }
-    order.volume -= total_pending;
-
-    if order.volume <= 0 {
-        return Err(OrderBookError::InvalidOrderVolume(order.volume));
-    }
-    Ok(false)
-}
-```
-
-### 沪市
-
-沪市在 `apply_pending_to_order()` 里把这条路专门关掉了：
-
-```rust
-let pending_reduction = if order.market == Market::XSHG {
-    0
-} else {
-    self.pending_reductions.remove(&order_id).unwrap_or(0)
-};
-```
-
-也就是说，当前实现里：
-
-- 深市：允许“先成交后委托”
-- 沪市：不对后到的委托做补扣
-
-所以沪市“成交先于委托”在这份代码里就是忽略处理，不追溯修正。
-
-## 6. 集合竞价怎么处理
-
-集合竞价这里也要单独看，因为当前实现不是“真实撮一轮”，而是“算一个展示用的理论结果”。
-
-### 时段判断
-
-worker 用固定时间窗口判断集合竞价：
-
-```rust
-fn is_call_auction_time(timestamp_ms: i64) -> bool {
-    const SHANGHAI_OFFSET_MS: i64 = 8 * 60 * 60 * 1_000;
-    const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
-    const OPENING_START_MS: i64 = (9 * 60 * 60 + 15 * 60) * 1_000;
-    const OPENING_END_MS: i64 = (9 * 60 * 60 + 25 * 60) * 1_000;
-    const CLOSING_START_MS: i64 = (14 * 60 * 60 + 57 * 60) * 1_000;
-    const CLOSING_END_MS: i64 = 15 * 60 * 60 * 1_000;
-
-    let local_ms = (timestamp_ms + SHANGHAI_OFFSET_MS).rem_euclid(DAY_MS);
-    (OPENING_START_MS..OPENING_END_MS).contains(&local_ms)
-        || (CLOSING_START_MS..CLOSING_END_MS).contains(&local_ms)
-}
-```
-
-然后取快照时分两条路：
-
-```rust
-let snapshot = if is_call_auction {
-    state.book.call_auction_snapshot(self.snapshot_depth)
-} else {
-    state.book.snapshot(self.snapshot_depth)
-};
-```
-
-### 理论撮合价怎么选
-
-`call_auction_result()` 的逻辑是：
+为了实现尽量的统一，我这里实现 `call_auction_result()` 的逻辑是：
 
 1. 枚举当前所有有效价位
 2. 对每个候选价算：
@@ -352,8 +280,8 @@ let snapshot = if is_call_auction {
    - 该价及以下累计卖量
    - 理论可成交量 `min(bid_qty, ask_qty)`
 3. 先选可成交量最大的
-4. 并列时选剩余量最小的
-5. 再并列时，优先靠近 `last_trade_price`；如果没有，就取中位价
+4. 由多个最大的并列时，选剩余量最小的
+5. 如果还有多个并列时，优先靠近 `last_trade_price`；如果没有，就取中间价
 
 核心代码：
 
@@ -361,8 +289,11 @@ let snapshot = if is_call_auction {
 fn call_auction_result(&self) -> Option<CallAuctionResult> {
     let mut best = Vec::new();
     for price in self.candidate_auction_prices() {
+        // 统计当前价位及以上价位的累计买量
         let bid_qty = self.bid_qty_at_or_above(price);
+        // 统计当前价位及以下价位的累计卖量
         let ask_qty = self.ask_qty_at_or_below(price);
+        // 理论上可以成交的量
         let executable_qty = bid_qty.min(ask_qty);
         if executable_qty <= 0 {
             continue;
@@ -373,6 +304,7 @@ fn call_auction_result(&self) -> Option<CallAuctionResult> {
             executable_qty,
             remaining_qty: bid_qty.abs_diff(ask_qty),
         };
+        // 处理并列的情况
         match best.first() {
             None => best.push(result),
             Some(current) if result.is_better_primary_than(current) => {
@@ -396,50 +328,17 @@ fn call_auction_result(&self) -> Option<CallAuctionResult> {
             .min_by_key(|result| (result.price.abs_diff(last_trade_price), result.price))
     } else {
         best.sort_by_key(|result| result.price);
+        // 中间价，实际上是取靠左的中位数
         best.get((best.len() - 1) / 2).copied()
     }
 }
 ```
 
-### 快照是什么样
+## 6. 总结
 
-它不会返回真实五档，而是直接拼一个单价位结果：
+- 沪市：委托先挂进盘口，后面的成交再把对应订单一点点扣掉，所以部分成交就是“还没扣完，就继续留在盘口里”。
 
-```rust
-let level = LevelSnapshot {
-    price: result.price,
-    total_qty: result.executable_qty,
-    order_count: 0,
-};
-OrderBookSnapshot {
-    bids: vec![level.clone()],
-    asks: vec![level],
-}
-```
+- 深市：普通限价单也是直接挂盘；市价单会先临时存起来，等后面的成交和撤单都走完以后，再决定这笔单是结束了、撤掉
+    了，还是把剩余部分挂回盘口。现在的实现里，如果最后还有剩余，就按第一次成交的价格挂回去。
 
-所以集合竞价时前端看到的，本质上就是：
-
-- `bid1 == ask1 == 理论撮合价`
-- `bid1_qty == ask1_qty == 理论可成交量`
-
-### 一个限制
-
-当前实现没有做这些事：
-
-- 不会在 09:25 或 15:00 真正把簿里的对敲量扣掉
-- 不会生成一笔集合竞价成交
-- 不会改变后续连续竞价的真实库存
-
-所以这块更准确的说法是：
-
-- 平时正常累计盘口
-- 到集合竞价时段时，按当前盘口算一个理论撮合价和量
-- 只用于 snapshot / Web 展示
-
-不是对簿执行一次真实集合竞价清算。
-
-## 7. 一句总结
-
-- **沪市**：委托先上簿，成交只削减当前可见单，部分成交自然保留剩余量；成交先于委托不追溯修正。
-- **深市**：普通限价单照常上簿，市价单先进入 `holding_orders`，沿后续成交链逐步吃量，链结束后剩余量按首次成交价转成限价挂单。
-- **集合竞价**：当前实现只计算并展示理论撮合价/量，不在 `OrderBook` 里真的执行一次集合竞价清算。
+- 集合竞价：感觉还需改进，尝试和交易所的交易规则保持完全一致
