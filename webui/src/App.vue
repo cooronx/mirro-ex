@@ -1,261 +1,379 @@
 <template>
-  <main class="app-shell">
-    <header class="topbar">
-      <div>
-        <h1>Mirro EX</h1>
-        <p>回放交易控制台</p>
+  <main v-if="!isAuthenticated" class="auth-shell">
+    <div class="auth-background"></div>
+    <section class="auth-panel">
+      <div class="auth-brand">
+        <div class="auth-brand-mark">M</div>
+        <div>
+          <h1>Mirro EX</h1>
+          <p>Precision Terminal</p>
+        </div>
       </div>
-      <div class="topbar-controls">
-        <t-tag :theme="statusTheme" variant="light">{{ replayStatus?.state ?? 'Unknown' }}</t-tag>
+
+      <div class="auth-card">
+        <div class="auth-header">
+          <span class="eyebrow">{{ authMode === 'login' ? '安全登录' : '创建账户' }}</span>
+          <h2>{{ authMode === 'login' ? '登录交易终端' : '创建模拟账户' }}</h2>
+          <p>{{ authMode === 'login' ? '使用账户名和密码进入交易控制台。' : '创建账户后会直接进入终端。' }}</p>
+        </div>
+
+        <t-form label-align="top" class="auth-form" @submit.prevent>
+          <t-form-item label="账户名">
+            <t-input v-model="authForm.username" placeholder="请输入账户名" />
+          </t-form-item>
+          <t-form-item label="密码">
+            <t-input v-model="authForm.password" type="password" placeholder="请输入密码" />
+          </t-form-item>
+          <t-form-item v-if="authMode === 'register'" label="初始资金">
+            <t-input v-model="authForm.initial_cash" placeholder="1000000.0000" />
+          </t-form-item>
+          <t-button block theme="primary" size="large" :loading="busy.auth" @click="authMode === 'login' ? handleLogin() : handleRegister()">
+            {{ authMode === 'login' ? '登录' : '创建账户并进入' }}
+          </t-button>
+        </t-form>
+
+        <t-alert v-if="authError" theme="warning" :message="authError" />
+
+        <div class="auth-footer">
+          <span>{{ authMode === 'login' ? '还没有账户？' : '已经有账户？' }}</span>
+          <button type="button" class="auth-link" @click="toggleAuthMode">
+            {{ authMode === 'login' ? '创建账户' : '返回登录' }}
+          </button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <main v-else class="terminal-shell">
+    <header class="terminal-topbar">
+      <div class="brand-block">
+        <div class="brand-row">
+          <span class="brand-logo">M</span>
+          <div>
+            <h1>Mirro EX</h1>
+            <p>回放交易控制台</p>
+          </div>
+        </div>
+        <nav class="terminal-tabs">
+          <button
+            v-for="tab in tabs"
+            :key="tab.id"
+            type="button"
+            class="terminal-tab"
+            :class="{ active: currentTab === tab.id }"
+            @click="currentTab = tab.id"
+          >
+            {{ tab.label }}
+          </button>
+        </nav>
+      </div>
+
+      <div class="topbar-meta">
+        <div class="session-pill">
+          <span class="session-dot" :class="`state-${replayStatus?.state ?? 'idle'}`"></span>
+          <div>
+            <strong>{{ session?.username }}</strong>
+            <span>{{ replayStatusText }}</span>
+          </div>
+        </div>
+        <t-button variant="text" theme="default" @click="handleLogout">退出</t-button>
       </div>
     </header>
 
-    <section class="grid">
-      <t-card title="回放控制" bordered class="panel replay-panel">
-        <t-form label-align="top" class="form-grid">
-          <t-form-item label="回放标的" class="full-form-item">
-            <t-textarea
-              v-model="replayCodesInput"
-              :disabled="replayInputsLocked"
-              :autosize="{ minRows: 2, maxRows: 4 }"
-              placeholder="多个代码用逗号、空格或换行分隔；留空播放全部"
-            />
-          </t-form-item>
-          <t-form-item label="开始日期">
-            <t-date-picker
-              v-model="replayForm.replay_start_date"
-              clearable
-              :disabled="replayInputsLocked"
-              format="YYYY-MM-DD"
-              value-type="YYYY-MM-DD"
-              placeholder="选择开始日期"
-            />
-          </t-form-item>
-          <t-form-item label="结束日期">
-            <t-date-picker
-              v-model="replayForm.replay_end_date"
-              clearable
-              :disabled="replayInputsLocked"
-              format="YYYY-MM-DD"
-              value-type="YYYY-MM-DD"
-              placeholder="选择结束日期"
-            />
-          </t-form-item>
-          <t-form-item label="开始时间">
-            <t-time-picker
-              v-model="replayForm.replay_start_time"
-              clearable
-              :disabled="replayInputsLocked"
-              format="HH:mm:ss"
-              placeholder="选择开始时间"
-            />
-          </t-form-item>
-          <t-form-item label="结束时间">
-            <t-time-picker
-              v-model="replayForm.replay_end_time"
-              clearable
-              :disabled="replayInputsLocked"
-              format="HH:mm:ss"
-              placeholder="选择结束时间"
-            />
-          </t-form-item>
-          <t-form-item label="回放速度">
-            <t-input-number v-model="replayForm.replay_speed" :min="1" theme="normal" :disabled="replayInputsLocked" />
-          </t-form-item>
-          <t-form-item label="跳过午休">
-            <t-switch v-model="replayForm.skip_intraday_breaks" :disabled="replayInputsLocked" />
-          </t-form-item>
-        </t-form>
-
-        <div class="button-row">
-          <t-button theme="primary" :loading="busy.replay" :disabled="replayInputsLocked" @click="handleStartReplay">开始</t-button>
-          <t-button :loading="busy.replay" @click="runReplayAction('pause')">暂停</t-button>
-          <t-button :loading="busy.replay" @click="runReplayAction('resume')">恢复</t-button>
-          <t-button theme="danger" variant="outline" :loading="busy.replay" @click="runReplayAction('stop')">停止</t-button>
+    <section v-if="currentTab === 'market'" class="market-screen">
+      <aside class="terminal-panel watchlist-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">行情</span>
+            <h3>活跃标的</h3>
+          </div>
+          <div class="heading-meta">
+            <strong>{{ activeSnapshots.length }}</strong>
+            <span>/ 50</span>
+          </div>
         </div>
 
-        <div class="speed-row">
-          <t-input-number v-model="speedValue" :min="1" theme="normal" />
-          <t-button :loading="busy.speed" @click="handleSetSpeed">设置速度</t-button>
+        <t-input
+          v-model="marketFilter"
+          clearable
+          placeholder="搜索标的代码"
+          @enter="handleMarketSearchEnter"
+        />
+
+        <div class="watchlist">
+          <button
+            v-for="snapshot in filteredActiveSnapshots"
+            :key="snapshot.code"
+            type="button"
+            class="watchlist-row"
+            :class="{ active: snapshot.code === selectedCode }"
+            @click="selectMarketCode(snapshot.code)"
+          >
+            <div class="watchlist-main">
+              <strong>{{ snapshot.code }}</strong>
+              <span>{{ formatPrice(snapshotDisplayPrice(snapshot)) }}</span>
+            </div>
+            <em>{{ formatTimeOnly(snapshot.timestamp_ms) }}</em>
+          </button>
+          <div v-if="filteredActiveSnapshots.length === 0" class="watchlist-empty">暂无活跃标的</div>
+        </div>
+      </aside>
+
+      <section class="chart-panel terminal-panel">
+        <div class="chart-topline">
+          <div>
+            <h2>{{ selectedCode || '未选择标的' }}</h2>
+            <p>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</p>
+          </div>
+          <div class="chart-badges">
+            <span class="metric-chip">最新价 {{ formatPrice(displayPrice) }}</span>
+            <span class="metric-chip">延迟 {{ marketLagText }}</span>
+          </div>
         </div>
 
-        <dl class="status-grid">
-          <div>
-            <dt>模拟时间</dt>
-            <dd>{{ formatDateTime(replayStatus?.sim_now_ms) }}</dd>
+        <div class="market-main">
+          <div class="chart-stack">
+            <div class="price-summary">
+              <div>
+                <span>最新价</span>
+                <strong>{{ formatPrice(displayPrice) }}</strong>
+              </div>
+              <div>
+                <span>最高价</span>
+                <strong>{{ chartHighPrice }}</strong>
+              </div>
+              <div>
+                <span>最低价</span>
+                <strong>{{ chartLowPrice }}</strong>
+              </div>
+            </div>
+            <div ref="chartContainer" class="price-chart">
+              <div v-if="chartPoints.length === 0" class="chart-empty">暂无日内成交价格</div>
+            </div>
+            <div class="chart-axis">
+              <span>{{ formatTimeOnly(chartStartTime) }}</span>
+              <span>{{ formatTimeOnly(chartEndTime) }}</span>
+            </div>
           </div>
-          <div>
-            <dt>行情时间</dt>
-            <dd>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</dd>
-          </div>
-          <div>
-            <dt>行情延迟</dt>
-            <dd :class="marketLagClass">{{ marketLagText }}</dd>
-          </div>
-          <div>
-            <dt>当前速度</dt>
-            <dd>{{ replayStatus?.replay_speed ?? '-' }}</dd>
-          </div>
-          <div>
-            <dt>进度</dt>
-            <dd>{{ formatPercent(replayStatus?.progress) }}</dd>
-          </div>
-          <div>
-            <dt>事件数</dt>
-            <dd>{{ replayStatus?.total_events ?? '-' }}</dd>
-          </div>
-        </dl>
-      </t-card>
 
-      <t-card title="行情" bordered class="panel market-panel">
-        <div class="market-layout">
-          <aside class="market-list">
-            <div class="market-list-header">
-              <strong>最近活跃 {{ activeSnapshots.length }}</strong>
-              <span>最多 50</span>
-            </div>
-            <t-input
-              v-model="marketFilter"
-              clearable
-              placeholder="搜索或输入标的代码"
-              @enter="handleMarketSearchEnter"
-            />
-            <div class="market-list-body">
-              <button
-                v-for="snapshot in filteredActiveSnapshots"
-                :key="snapshot.code"
-                type="button"
-                class="market-list-row"
-                :class="{ active: snapshot.code === selectedCode }"
-                @click="selectMarketCode(snapshot.code)"
-              >
-                <span class="market-list-code">{{ snapshot.code }}</span>
-                <strong>{{ formatPrice(snapshotDisplayPrice(snapshot)) }}</strong>
-                <span>买一 {{ formatPrice(snapshot.bids[0]?.price) }} / {{ snapshot.bids[0]?.qty ?? '-' }}</span>
-                <span>卖一 {{ formatPrice(snapshot.asks[0]?.price) }} / {{ snapshot.asks[0]?.qty ?? '-' }}</span>
-                <em>{{ formatTimeOnly(snapshot.timestamp_ms) }}</em>
-              </button>
-              <div v-if="filteredActiveSnapshots.length === 0" class="market-list-empty">暂无活跃标的</div>
-            </div>
+          <aside class="trade-sidebar">
+            <section class="subpanel orderbook-panel">
+              <div class="subpanel-title">五档盘口</div>
+              <div class="book-side">
+                <div v-for="(level, index) in askLevels" :key="`ask-${index}`" class="book-row ask-row">
+                  <span>卖 {{ 5 - index }}</span>
+                  <strong>{{ formatPrice(level?.price) }}</strong>
+                  <em>{{ level?.qty ?? '-' }}</em>
+                </div>
+              </div>
+              <div class="last-price">{{ formatPrice(displayPrice) }}</div>
+              <div class="book-side">
+                <div v-for="(level, index) in bidLevels" :key="`bid-${index}`" class="book-row bid-row">
+                  <span>买 {{ index + 1 }}</span>
+                  <strong>{{ formatPrice(level?.price) }}</strong>
+                  <em>{{ level?.qty ?? '-' }}</em>
+                </div>
+              </div>
+            </section>
+
+            <section class="subpanel order-entry-panel">
+              <div class="subpanel-title">下单面板</div>
+              <t-form label-align="top" class="order-form" @submit.prevent>
+                <t-form-item label="方向">
+                  <t-radio-group v-model="orderForm.side" variant="default-filled">
+                    <t-radio-button value="buy">买入</t-radio-button>
+                    <t-radio-button value="sell">卖出</t-radio-button>
+                  </t-radio-group>
+                </t-form-item>
+                <t-form-item label="价格">
+                  <t-input v-model="orderForm.price" placeholder="23.4600" />
+                </t-form-item>
+                <t-form-item label="数量">
+                  <t-input-number v-model="orderForm.qty" :min="1" theme="normal" />
+                </t-form-item>
+                <t-button block theme="primary" :loading="busy.order" @click="handleCreateOrder">
+                  {{ orderForm.side === 'buy' ? '提交买单' : '提交卖单' }}
+                </t-button>
+              </t-form>
+              <t-alert v-if="orderMessage" :theme="orderMessageTheme" :message="orderMessage" />
+            </section>
           </aside>
-
-          <div class="market-detail">
-            <div class="market-detail-title">
-              <strong>{{ selectedCode || '未选择标的' }}</strong>
-              <span>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</span>
-            </div>
-            <div class="market-detail-layout">
-              <div class="intraday-chart">
-                <div class="chart-header">
-                  <div>
-                    <dt>最新价</dt>
-                    <dd>{{ formatPrice(displayPrice) }}</dd>
-                  </div>
-                  <span>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</span>
-                </div>
-                <div ref="chartContainer" class="price-chart">
-                  <div v-if="chartPoints.length === 0" class="chart-empty">暂无日内成交价格</div>
-                </div>
-                <div class="chart-axis">
-                  <span>{{ formatTimeOnly(chartStartTime) }}</span>
-                  <span>{{ chartPriceRange }}</span>
-                  <span>{{ formatTimeOnly(chartEndTime) }}</span>
-                </div>
-              </div>
-
-              <div class="orderbook">
-                <div class="orderbook-title">五档盘口</div>
-                <div class="book-side asks">
-                  <div v-for="(level, index) in askLevels" :key="`ask-${index}`" class="book-row ask-row">
-                    <span>卖{{ 5 - index }}</span>
-                    <strong>{{ formatPrice(level?.price) }}</strong>
-                    <em>{{ level?.qty ?? '-' }}</em>
-                  </div>
-                </div>
-                <div class="last-price">
-                  {{ formatPrice(displayPrice) }}
-                </div>
-                <div class="book-side bids">
-                  <div v-for="(level, index) in bidLevels" :key="`bid-${index}`" class="book-row bid-row">
-                    <span>买{{ index + 1 }}</span>
-                    <strong>{{ formatPrice(level?.price) }}</strong>
-                    <em>{{ level?.qty ?? '-' }}</em>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
+
         <t-alert v-if="marketError" theme="warning" :message="marketError" />
-      </t-card>
+      </section>
 
-      <t-card title="账户" bordered class="panel account-panel">
-        <div class="inline-form">
-          <t-input v-model="userId" placeholder="user_id" />
-          <t-button :loading="busy.account" @click="refreshAccountAndOrders">查询</t-button>
-        </div>
-        <div class="inline-form account-create-form">
-          <t-input v-model="accountForm.initial_cash" placeholder="初始资金 1000000.0000" />
-          <t-button theme="primary" :loading="busy.createAccount" @click="handleCreateAccount">创建账户</t-button>
-        </div>
-        <dl class="status-grid">
-          <div>
-            <dt>总资金</dt>
-            <dd>{{ formatMoney(account?.cash_balance) }}</dd>
-          </div>
-          <div>
-            <dt>可用资金</dt>
-            <dd>{{ formatMoney(account?.available_cash) }}</dd>
-          </div>
-          <div>
-            <dt>冻结资金</dt>
-            <dd>{{ formatMoney(account?.frozen_cash) }}</dd>
-          </div>
-        </dl>
-        <t-alert v-if="accountError" theme="warning" :message="accountError" />
-      </t-card>
+      <section class="market-footer">
+        <t-card title="回放控制" bordered class="terminal-card">
+          <t-form label-align="top" class="replay-form">
+            <t-form-item label="回放标的" class="replay-span-two">
+              <t-textarea
+                v-model="replayCodesInput"
+                :disabled="replayInputsLocked"
+                :autosize="{ minRows: 2, maxRows: 4 }"
+                placeholder="多个代码用逗号、空格或换行分隔；留空播放全部"
+              />
+            </t-form-item>
+            <t-form-item label="开始日期">
+              <t-date-picker
+                v-model="replayForm.replay_start_date"
+                clearable
+                :disabled="replayInputsLocked"
+                format="YYYY-MM-DD"
+                value-type="YYYY-MM-DD"
+                placeholder="开始日期"
+              />
+            </t-form-item>
+            <t-form-item label="结束日期">
+              <t-date-picker
+                v-model="replayForm.replay_end_date"
+                clearable
+                :disabled="replayInputsLocked"
+                format="YYYY-MM-DD"
+                value-type="YYYY-MM-DD"
+                placeholder="结束日期"
+              />
+            </t-form-item>
+            <t-form-item label="开始时间">
+              <t-time-picker
+                v-model="replayForm.replay_start_time"
+                clearable
+                :disabled="replayInputsLocked"
+                format="HH:mm:ss"
+                placeholder="开始时间"
+              />
+            </t-form-item>
+            <t-form-item label="结束时间">
+              <t-time-picker
+                v-model="replayForm.replay_end_time"
+                clearable
+                :disabled="replayInputsLocked"
+                format="HH:mm:ss"
+                placeholder="结束时间"
+              />
+            </t-form-item>
+          </t-form>
 
-      <t-card title="下单" bordered class="panel order-panel">
-        <t-form label-align="top" class="order-form">
-          <t-form-item label="方向">
-            <t-radio-group v-model="orderForm.side" variant="default-filled">
-              <t-radio-button value="buy">买入</t-radio-button>
-              <t-radio-button value="sell">卖出</t-radio-button>
-            </t-radio-group>
-          </t-form-item>
-          <t-form-item label="价格">
-            <t-input v-model="orderForm.price" placeholder="10.0000" />
-          </t-form-item>
-          <t-form-item label="数量">
-            <t-input-number v-model="orderForm.qty" :min="1" theme="normal" />
-          </t-form-item>
-          <t-button block theme="primary" :loading="busy.order" @click="handleCreateOrder">提交限价单</t-button>
-        </t-form>
+          <div class="control-strip">
+            <div class="speed-stack">
+              <span>回放速度</span>
+              <div class="speed-slider-row">
+                <input
+                  v-model.number="speedValue"
+                  class="speed-slider"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  @change="handleSpeedSliderChange"
+                />
+                <strong>{{ speedValue }}x</strong>
+              </div>
+            </div>
+            <div class="button-row">
+              <t-button theme="primary" :loading="busy.replay" :disabled="replayInputsLocked" @click="handleStartReplay">开始</t-button>
+              <t-button :loading="busy.replay" @click="runReplayAction('pause')">暂停</t-button>
+              <t-button :loading="busy.replay" @click="runReplayAction('resume')">恢复</t-button>
+              <t-button theme="danger" variant="outline" :loading="busy.replay" @click="runReplayAction('stop')">停止</t-button>
+            </div>
+          </div>
+
+          <dl class="status-grid">
+            <div>
+              <dt>模拟时间</dt>
+              <dd>{{ formatDateTime(replayStatus?.sim_now_ms) }}</dd>
+            </div>
+            <div>
+              <dt>行情时间</dt>
+              <dd>{{ formatDateTime(marketSnapshot?.timestamp_ms) }}</dd>
+            </div>
+            <div>
+              <dt>当前速度</dt>
+              <dd>{{ replayStatus?.replay_speed ?? '-' }}</dd>
+            </div>
+            <div>
+              <dt>进度</dt>
+              <dd>{{ formatPercent(replayStatus?.progress) }}</dd>
+            </div>
+            <div>
+              <dt>事件数</dt>
+              <dd>{{ replayStatus?.total_events ?? '-' }}</dd>
+            </div>
+            <div>
+              <dt>跳过午休</dt>
+              <dd>{{ replayForm.skip_intraday_breaks ? '是' : '否' }}</dd>
+            </div>
+          </dl>
+        </t-card>
+
+        <t-card title="账户概览" bordered class="terminal-card account-summary-card">
+          <div class="account-summary-head">
+            <span>用户 ID {{ currentUserId ?? '-' }}</span>
+            <t-button size="small" theme="primary" variant="outline" :loading="busy.account" @click="refreshAccountAndOrders">刷新</t-button>
+          </div>
+          <dl class="account-metrics">
+            <div>
+              <dt>总资产</dt>
+              <dd>{{ formatMoney(account?.cash_balance) }}</dd>
+            </div>
+            <div>
+              <dt>可用资金</dt>
+              <dd>{{ formatMoney(account?.available_cash) }}</dd>
+            </div>
+            <div>
+              <dt>冻结资金</dt>
+              <dd>{{ formatMoney(account?.frozen_cash) }}</dd>
+            </div>
+          </dl>
+          <div class="account-summary-foot">
+            <span>更新时间 {{ formatTimeOnly(account?.updated_at) }}</span>
+            <span>状态 {{ replayStatusText }}</span>
+          </div>
+          <t-alert v-if="accountError" theme="warning" :message="accountError" />
+        </t-card>
+      </section>
+    </section>
+
+    <section v-else-if="currentTab === 'trade'" class="tab-screen">
+      <t-card title="订单列表" bordered class="terminal-card tab-card">
+        <div class="tab-card-head">
+          <div>
+            <span class="eyebrow">交易</span>
+            <h3>订单列表与撤单</h3>
+          </div>
+          <t-button theme="primary" variant="outline" :loading="busy.orders" @click="refreshAccountAndOrders">刷新</t-button>
+        </div>
         <t-alert v-if="orderMessage" :theme="orderMessageTheme" :message="orderMessage" />
+        <t-table
+          row-key="order_id"
+          size="small"
+          :data="orders"
+          :columns="orderColumns"
+          :loading="busy.orders"
+          :pagination="orderPagination"
+        />
       </t-card>
     </section>
 
-    <t-card title="持仓" bordered class="positions-panel">
-      <t-table
-        row-key="code"
-        size="small"
-        :data="positions"
-        :columns="positionColumns"
-        :loading="busy.positions"
-        :pagination="positionPagination"
-      />
-    </t-card>
-
-    <t-card title="订单" bordered class="orders-panel">
-      <t-table
-        row-key="order_id"
-        size="small"
-        :data="orders"
-        :columns="orderColumns"
-        :loading="busy.orders"
-        :pagination="orderPagination"
-      />
-    </t-card>
+    <section v-else class="tab-screen">
+      <t-card title="持仓总览" bordered class="terminal-card tab-card">
+        <div class="tab-card-head">
+          <div>
+            <span class="eyebrow">持仓</span>
+            <h3>持仓总览</h3>
+          </div>
+          <t-button theme="primary" variant="outline" :loading="busy.positions" @click="refreshAccountAndOrders">刷新</t-button>
+        </div>
+        <t-table
+          row-key="code"
+          size="small"
+          :data="positions"
+          :columns="positionColumns"
+          :loading="busy.positions"
+          :pagination="positionPagination"
+        />
+      </t-card>
+    </section>
   </main>
 </template>
 
@@ -295,6 +413,7 @@ import {
   getPositions,
   getReplayConfig,
   getReplayStatus,
+  login,
   pauseReplay,
   resumeReplay,
   setReplaySpeed,
@@ -304,11 +423,32 @@ import {
 
 const INTRADAY_BUCKET_MS = 3_000;
 const MARKET_SNAPSHOT_LIMIT = 50;
+const SESSION_STORAGE_KEY = 'mirro-ex-session';
 
+type IntradayCache = {
+  points: MarketPricePoint[];
+  nextSeq: number;
+};
+
+type AuthMode = 'login' | 'register';
+type AppTab = 'market' | 'trade' | 'portfolio';
+type SessionSnapshot = {
+  user_id: number;
+  username: string;
+};
+
+const tabs: Array<{ id: AppTab; label: string }> = [
+  { id: 'market', label: '行情' },
+  { id: 'trade', label: '交易' },
+  { id: 'portfolio', label: '持仓' }
+];
+
+const authMode = ref<AuthMode>('login');
+const currentTab = ref<AppTab>('market');
+const session = ref<SessionSnapshot | null>(null);
 const replayCodesInput = ref('');
 const selectedCode = ref('');
 const marketFilter = ref('');
-const userId = ref('');
 const replayStatus = ref<ReplayStatus | null>(null);
 const replayConfig = ref<ReplayConfig | null>(null);
 const marketSnapshot = ref<MarketSnapshot | null>(null);
@@ -320,12 +460,14 @@ const positions = ref<TradingPosition[]>([]);
 const orders = ref<TradingOrder[]>([]);
 const orderMessage = ref('');
 const orderMessageTheme = ref<'success' | 'error'>('success');
+const authError = ref('');
 const speedValue = ref(1);
 const cancelingOrderId = ref<string | null>(null);
 const chartContainer = ref<HTMLDivElement | null>(null);
 let chart: IChartApi | null = null;
 let lineSeries: ISeriesApi<'Line'> | null = null;
 let chartResizeObserver: ResizeObserver | null = null;
+let chartHost: HTMLDivElement | null = null;
 let eventSource: EventSource | null = null;
 let replayRefreshTimer: number | null = null;
 let marketSnapshotsRefreshTimer: number | null = null;
@@ -334,12 +476,13 @@ let tradingRefreshTimer: number | null = null;
 let pendingReplayConfigRefresh = false;
 let marketRequestSeq = 0;
 
-type IntradayCache = {
-  points: MarketPricePoint[];
-  nextSeq: number;
-};
-
 const intradayCaches = reactive<Record<string, IntradayCache>>({});
+
+const authForm = reactive({
+  username: '',
+  password: '',
+  initial_cash: '1000000.0000'
+});
 
 const replayForm = reactive({
   replay_start_date: '',
@@ -356,34 +499,25 @@ const orderForm = reactive({
   qty: 100
 });
 
-const accountForm = reactive({
-  initial_cash: ''
-});
-
 const busy = reactive({
+  auth: false,
   replay: false,
   speed: false,
   account: false,
-  createAccount: false,
   order: false,
   positions: false,
   orders: false,
   cancelOrder: false
 });
 
-const statusTheme = computed(() => {
-  const state = replayStatus.value?.state;
-  if (state === 'running') return 'success';
-  if (state === 'paused') return 'warning';
-  if (state === 'failed') return 'danger';
-  return 'default';
-});
-
+const isAuthenticated = computed(() => session.value !== null);
+const currentUserId = computed(() => session.value?.user_id ?? null);
+const replayStatusLabel = computed(() => replayStatus.value?.state ?? 'idle');
+const replayStatusText = computed(() => formatReplayState(replayStatus.value?.state));
 const replayInputsLocked = computed(() => {
   const state = replayStatus.value?.state;
   return Boolean(replayConfig.value?.active_replay_task) || state === 'running' || state === 'paused' || state === 'stopping';
 });
-
 const bidLevels = computed(() => padLevels(marketSnapshot.value?.bids ?? []));
 const askLevels = computed(() => padLevels(marketSnapshot.value?.asks ?? []).reverse());
 const displayPrice = computed(() => marketSnapshot.value?.auction_price ?? marketSnapshot.value?.last_price ?? null);
@@ -392,14 +526,16 @@ const filteredActiveSnapshots = computed(() => {
   if (!keyword) return activeSnapshots.value;
   return activeSnapshots.value.filter((snapshot) => snapshot.code.toUpperCase().includes(keyword));
 });
-
 const chartPoints = computed(() => intradayCaches[selectedCode.value.trim()]?.points ?? []);
 const chartStartTime = computed(() => chartPoints.value[0]?.timestamp_ms ?? null);
 const chartEndTime = computed(() => chartPoints.value[chartPoints.value.length - 1]?.timestamp_ms ?? null);
-const chartPriceRange = computed(() => {
+const chartHighPrice = computed(() => {
   if (chartPoints.value.length === 0) return '-';
-  const prices = chartPoints.value.map((point) => point.price);
-  return `${formatPrice(Math.min(...prices))} - ${formatPrice(Math.max(...prices))}`;
+  return formatPrice(Math.max(...chartPoints.value.map((point) => point.price)));
+});
+const chartLowPrice = computed(() => {
+  if (chartPoints.value.length === 0) return '-';
+  return formatPrice(Math.min(...chartPoints.value.map((point) => point.price)));
 });
 const marketLagMs = computed(() => {
   const simNow = replayStatus.value?.sim_now_ms;
@@ -408,13 +544,6 @@ const marketLagMs = computed(() => {
   return Math.max(0, simNow - marketNow);
 });
 const marketLagText = computed(() => formatDuration(marketLagMs.value));
-const marketLagClass = computed(() => {
-  const lag = marketLagMs.value;
-  if (lag === null) return '';
-  if (lag >= 60_000) return 'lag-danger';
-  if (lag >= 10_000) return 'lag-warning';
-  return 'lag-ok';
-});
 const positionPagination = computed(() => ({
   defaultPageSize: 10,
   showJumper: true,
@@ -505,20 +634,21 @@ const positionColumns: TableProps['columns'] = [
   }
 ];
 
-onMounted(() => {
-  initPriceChart();
-  refreshAll();
+onMounted(async () => {
+  session.value = readStoredSession();
+  await refreshAll();
   connectEventStream();
+  if (session.value) {
+    await refreshAccountAndOrders(false);
+  }
+  await nextTick();
+  ensurePriceChart();
 });
 
 onUnmounted(() => {
   closeEventStream();
   clearScheduledRefreshes();
-  chartResizeObserver?.disconnect();
-  chartResizeObserver = null;
-  chart?.remove();
-  chart = null;
-  lineSeries = null;
+  teardownPriceChart();
 });
 
 watch(chartPoints, () => {
@@ -532,14 +662,21 @@ watch(selectedCode, () => {
   refreshMarket();
 });
 
+watch([isAuthenticated, currentTab], async () => {
+  await nextTick();
+  if (currentTab.value === 'market') {
+    ensurePriceChart();
+    updatePriceChart();
+    return;
+  }
+  teardownPriceChart();
+});
+
 async function refreshAll() {
   await refreshReplayStatus();
   await refreshReplayConfig();
   await refreshMarketSnapshots();
   await refreshMarket();
-  if (userId.value.trim()) {
-    await refreshAccountAndOrders(false);
-  }
 }
 
 function connectEventStream() {
@@ -562,9 +699,8 @@ function connectEventStream() {
   eventSource.addEventListener('trading_changed', (event) => {
     const payload = parseAppEvent(event);
     if (!payload || payload.type !== 'trading_changed') return;
-    const normalizedUserId = userId.value.trim();
-    if (!normalizedUserId) return;
-    if (payload.user_id && payload.user_id !== normalizedUserId) return;
+    if (!currentUserId.value) return;
+    if (payload.user_id && Number(payload.user_id) !== currentUserId.value) return;
     scheduleTradingRefresh();
   });
   eventSource.onerror = () => {
@@ -619,7 +755,7 @@ function scheduleTradingRefresh() {
   if (tradingRefreshTimer !== null) return;
   tradingRefreshTimer = window.setTimeout(async () => {
     tradingRefreshTimer = null;
-    if (userId.value.trim()) {
+    if (currentUserId.value !== null) {
       await refreshAccountAndOrders(false);
     }
   }, 300);
@@ -641,7 +777,7 @@ async function refreshReplayStatus() {
   try {
     replayStatus.value = await getReplayStatus();
   } catch {
-    // The top-level status is intentionally quiet during server startup.
+    // Keep the terminal usable while the backend is still starting.
   }
 }
 
@@ -656,7 +792,6 @@ async function refreshReplayConfig() {
 
 function applyActiveReplayTask(task: ReplayConfig['active_replay_task']) {
   if (!task) return;
-
   replayForm.replay_start_date = task.replay_start_date;
   replayForm.replay_end_date = task.replay_end_date;
   replayForm.replay_start_time = normalizeReplayTime(task.replay_start_time);
@@ -665,7 +800,6 @@ function applyActiveReplayTask(task: ReplayConfig['active_replay_task']) {
   replayForm.skip_intraday_breaks = task.skip_intraday_breaks;
   speedValue.value = task.replay_speed;
   replayCodesInput.value = task.replay_codes.join('\n');
-
   if (!selectedCode.value && task.replay_codes.length > 0) {
     selectedCode.value = task.replay_codes[0];
   }
@@ -681,15 +815,13 @@ async function refreshMarket() {
   }
   try {
     const snapshot = await getMarketSnapshot(normalizedCode);
-    if (requestSeq !== marketRequestSeq) return;
-    if (selectedCode.value.trim() !== normalizedCode) return;
+    if (requestSeq !== marketRequestSeq || selectedCode.value.trim() !== normalizedCode) return;
     marketSnapshot.value = snapshot;
     marketError.value = '';
     upsertActiveSnapshot(snapshot);
     await refreshIntraday(normalizedCode, requestSeq);
   } catch (error) {
-    if (requestSeq !== marketRequestSeq) return;
-    if (selectedCode.value.trim() !== normalizedCode) return;
+    if (requestSeq !== marketRequestSeq || selectedCode.value.trim() !== normalizedCode) return;
     marketSnapshot.value = null;
     marketError.value = messageOf(error);
   }
@@ -737,9 +869,19 @@ function sameIntradayBucket(left: MarketPricePoint, right: MarketPricePoint) {
   return Math.floor(left.timestamp_ms / INTRADAY_BUCKET_MS) === Math.floor(right.timestamp_ms / INTRADAY_BUCKET_MS);
 }
 
-function initPriceChart() {
+function ensurePriceChart() {
   if (!chartContainer.value) return;
 
+  if (chart && chartHost !== chartContainer.value) {
+    teardownPriceChart();
+  }
+
+  if (chart) {
+    updatePriceChart();
+    return;
+  }
+
+  chartHost = chartContainer.value;
   chart = createChart(chartContainer.value, {
     autoSize: true,
     layout: {
@@ -808,14 +950,21 @@ function initPriceChart() {
   updatePriceChart();
 }
 
+function teardownPriceChart() {
+  chartResizeObserver?.disconnect();
+  chartResizeObserver = null;
+  chart?.remove();
+  chart = null;
+  lineSeries = null;
+  chartHost = null;
+}
+
 function updatePriceChart() {
   if (!chart || !lineSeries) return;
-
   const data: LineData<UTCTimestamp>[] = chartPoints.value.map((point) => ({
     time: Math.floor(point.timestamp_ms / 1000) as UTCTimestamp,
     value: rawPriceToHuman(point.price)
   }));
-
   lineSeries.setData(data);
   if (data.length > 0) {
     chart.timeScale().fitContent();
@@ -823,9 +972,8 @@ function updatePriceChart() {
 }
 
 async function refreshAccountAndOrders(showLoading = true) {
-  const normalizedUserId = userId.value.trim();
-  if (!normalizedUserId) {
-    accountError.value = '请输入 user_id';
+  if (currentUserId.value === null) {
+    accountError.value = '当前未登录账户';
     return;
   }
   if (showLoading) {
@@ -834,10 +982,11 @@ async function refreshAccountAndOrders(showLoading = true) {
   busy.positions = true;
   busy.orders = true;
   try {
+    const userId = String(currentUserId.value);
     const [nextAccount, nextPositions, nextOrders] = await Promise.all([
-      getAccount(normalizedUserId),
-      getPositions(normalizedUserId),
-      getOrders(normalizedUserId)
+      getAccount(userId),
+      getPositions(userId),
+      getOrders(userId)
     ]);
     account.value = nextAccount;
     positions.value = nextPositions;
@@ -855,35 +1004,81 @@ async function refreshAccountAndOrders(showLoading = true) {
   }
 }
 
-async function handleCreateAccount() {
-  const normalizedUserId = userId.value.trim();
-  const initialCash = humanPriceToRaw(accountForm.initial_cash);
-  if (!normalizedUserId || initialCash === null) {
-    showError('请填写 user_id 和有效初始资金');
+async function handleLogin() {
+  if (!authForm.username.trim() || !authForm.password.trim()) {
+    authError.value = '请输入账户名和密码';
     return;
   }
 
-  busy.createAccount = true;
-  accountError.value = '';
+  busy.auth = true;
+  authError.value = '';
+  try {
+    const nextAccount = await login({
+      username: authForm.username.trim(),
+      password: authForm.password.trim()
+    });
+    applySession(nextAccount);
+    showSuccess(`欢迎回来，${nextAccount.username}`);
+  } catch (error) {
+    authError.value = messageOf(error);
+  } finally {
+    busy.auth = false;
+  }
+}
+
+async function handleRegister() {
+  const initialCash = humanPriceToRaw(authForm.initial_cash);
+  if (!authForm.username.trim() || !authForm.password.trim() || initialCash === null) {
+    authError.value = '请填写账户名、密码和有效初始资金';
+    return;
+  }
+
+  busy.auth = true;
+  authError.value = '';
   try {
     const nextAccount = await createAccount({
-      user_id: normalizedUserId,
+      username: authForm.username.trim(),
+      password: authForm.password.trim(),
       initial_cash: initialCash
     });
-    account.value = nextAccount;
-    accountError.value = '';
-    const [nextPositions, nextOrders] = await Promise.all([
-      getPositions(normalizedUserId),
-      getOrders(normalizedUserId)
-    ]);
-    positions.value = nextPositions;
-    orders.value = nextOrders;
-    showSuccess(`账户已创建：${nextAccount.user_id}`);
+    applySession(nextAccount);
+    showSuccess(`账户已创建：${nextAccount.username}`);
   } catch (error) {
-    showError(error);
+    authError.value = messageOf(error);
   } finally {
-    busy.createAccount = false;
+    busy.auth = false;
   }
+}
+
+function toggleAuthMode() {
+  authError.value = '';
+  authMode.value = authMode.value === 'login' ? 'register' : 'login';
+}
+
+async function applySession(nextAccount: Account) {
+  session.value = {
+    user_id: nextAccount.user_id,
+    username: nextAccount.username
+  };
+  persistSession(session.value);
+  account.value = nextAccount;
+  currentTab.value = 'market';
+  orderMessage.value = '';
+  await nextTick();
+  ensurePriceChart();
+  await refreshAccountAndOrders(false);
+}
+
+function handleLogout() {
+  session.value = null;
+  account.value = null;
+  positions.value = [];
+  orders.value = [];
+  accountError.value = '';
+  orderMessage.value = '';
+  authError.value = '';
+  authForm.password = '';
+  removeStoredSession();
 }
 
 async function handleStartReplay() {
@@ -958,20 +1153,23 @@ async function handleSetSpeed() {
   }
 }
 
+function handleSpeedSliderChange() {
+  void handleSetSpeed();
+}
+
 async function handleCreateOrder() {
-  const normalizedUserId = userId.value.trim();
   const normalizedCode = selectedCode.value.trim();
   const price = humanPriceToRaw(orderForm.price);
   orderMessage.value = '';
-  if (!normalizedUserId || !normalizedCode || price === null || !orderForm.qty) {
-    showError('请填写 user_id、选择标的、价格和数量');
+  if (currentUserId.value === null || !normalizedCode || price === null || !orderForm.qty) {
+    showError('请先登录、选择标的并填写价格和数量');
     return;
   }
 
   busy.order = true;
   try {
     const order = await createOrder({
-      user_id: normalizedUserId,
+      user_id: String(currentUserId.value),
       code: normalizedCode,
       side: orderForm.side,
       price,
@@ -989,12 +1187,11 @@ async function handleCreateOrder() {
 }
 
 async function handleCancelOrder(order: TradingOrder) {
-  const normalizedUserId = userId.value.trim();
-  orderMessage.value = '';
-  if (!normalizedUserId) {
-    showError('请输入 user_id');
+  if (currentUserId.value === null) {
+    showError('当前未登录账户');
     return;
   }
+  orderMessage.value = '';
   if (!window.confirm(`确认撤单 ${order.order_id}？`)) {
     return;
   }
@@ -1003,7 +1200,7 @@ async function handleCancelOrder(order: TradingOrder) {
   cancelingOrderId.value = order.order_id;
   try {
     const canceled = await cancelOrder({
-      user_id: normalizedUserId,
+      user_id: String(currentUserId.value),
       order_id: order.order_id
     });
     orderMessageTheme.value = 'success';
@@ -1063,7 +1260,6 @@ function upsertActiveSnapshot(snapshot: MarketSnapshot) {
 function mergeStableSnapshots(current: MarketSnapshot[], incoming: MarketSnapshot[]) {
   const nextSnapshots = [...current];
   const knownCodes = new Set(nextSnapshots.map((snapshot) => snapshot.code));
-
   for (const snapshot of incoming) {
     const existingIndex = nextSnapshots.findIndex((item) => item.code === snapshot.code);
     if (existingIndex >= 0) {
@@ -1076,7 +1272,6 @@ function mergeStableSnapshots(current: MarketSnapshot[], incoming: MarketSnapsho
     knownCodes.add(snapshot.code);
     nextSnapshots.push(snapshot);
   }
-
   return nextSnapshots;
 }
 
@@ -1110,7 +1305,7 @@ function positionCost(position: TradingPosition) {
 
 function formatPrice(value?: number | null) {
   if (value === null || value === undefined) return '-';
-  return rawPriceToHuman(value).toFixed(4);
+  return rawPriceToHuman(value).toFixed(2);
 }
 
 function formatMoney(value?: number | null) {
@@ -1160,6 +1355,16 @@ function formatDuration(value?: number | null) {
   return `${minutes}m ${seconds}s`;
 }
 
+function formatReplayState(value?: string | null) {
+  if (!value) return '空闲';
+  if (value === 'running') return '运行中';
+  if (value === 'paused') return '已暂停';
+  if (value === 'stopping') return '停止中';
+  if (value === 'finished') return '已完成';
+  if (value === 'failed') return '失败';
+  return '空闲';
+}
+
 function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1183,5 +1388,28 @@ function showSuccess(message: string) {
 
 function padLevels<T>(levels: T[]): Array<T | null> {
   return Array.from({ length: 5 }, (_, index) => levels[index] ?? null);
+}
+
+function readStoredSession(): SessionSnapshot | null {
+  const payload = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as SessionSnapshot;
+    if (typeof parsed.user_id === 'number' && typeof parsed.username === 'string') {
+      return parsed;
+    }
+  } catch {
+    // Ignore malformed storage payloads.
+  }
+  return null;
+}
+
+function persistSession(nextSession: SessionSnapshot | null) {
+  if (!nextSession) return;
+  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
+}
+
+function removeStoredSession() {
+  window.localStorage.removeItem(SESSION_STORAGE_KEY);
 }
 </script>

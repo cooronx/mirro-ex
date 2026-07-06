@@ -104,7 +104,9 @@ export interface MarketPricePoint {
 }
 
 export interface Account {
-  user_id: string;
+  user_id: number;
+  username: string;
+  password: string;
   cash_balance: number;
   available_cash: number;
   frozen_cash: number;
@@ -162,18 +164,22 @@ const API_ERROR_MESSAGES: Record<number, string> = {
   2004: '订单查询请求无效',
   2005: '撤单请求无效',
   2006: '持仓查询请求无效',
+  2007: '登录请求无效',
   2101: '请输入 user_id',
   2102: '初始资金必须大于 0',
   2103: '请输入标的代码',
   2104: '价格必须大于 0',
   2105: '数量必须大于 0',
   2106: '订单方向不支持',
+  2107: '请输入用户名',
+  2108: '请输入密码',
   2201: '回放运行中才能下单或撤单',
   2301: '可用资金不足',
   2302: '可用持仓不足',
   2404: '资金账户不存在',
   2405: '订单不存在',
   2406: '订单当前状态不可撤单',
+  2407: '用户名或密码错误',
   2409: '资金账户已存在',
   2500: '交易存储操作失败',
   2501: '交易任务执行失败',
@@ -263,7 +269,11 @@ export function getAccount(userId: string) {
   return request<Account>(`/trading/accounts?user_id=${encodeURIComponent(userId)}`);
 }
 
-export function createAccount(payload: { user_id: string; initial_cash: number }) {
+export function login(payload: { username: string; password: string }) {
+  return request<Account>('/trading/login', jsonPost(payload));
+}
+
+export function createAccount(payload: { username: string; password: string; initial_cash: number }) {
   return request<Account>('/trading/accounts', jsonPost(payload));
 }
 
