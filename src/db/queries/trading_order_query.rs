@@ -37,7 +37,7 @@ pub fn insert_order(connection: &Connection, order: &TradingOrder) -> rusqlite::
 
 pub fn query_orders_by_user_id(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
 ) -> rusqlite::Result<Vec<TradingOrder>> {
     let mut statement = connection.prepare(
         "SELECT

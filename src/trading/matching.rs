@@ -55,7 +55,7 @@ fn apply_buy_side_fill(
     let cash_cost = checked_amount(fill.price, fill.qty)?;
     settle_buy_cash(
         connection,
-        &order.user_id,
+        order.user_id,
         frozen_release,
         cash_cost,
         fill.filled_at,
@@ -66,7 +66,7 @@ fn apply_buy_side_fill(
     })?;
     apply_buy_fill(
         connection,
-        &order.user_id,
+        order.user_id,
         &order.code,
         fill.price,
         fill.qty,
@@ -87,7 +87,7 @@ fn apply_sell_side_fill(
     let proceeds = checked_amount(fill.price, fill.qty)?;
     if apply_sell_fill(
         connection,
-        &order.user_id,
+        order.user_id,
         &order.code,
         fill.qty,
         fill.filled_at,
@@ -98,11 +98,11 @@ fn apply_sell_side_fill(
     })? == 0
     {
         return Err(TradingStoreError::InsufficientPosition {
-            user_id: order.user_id.clone(),
+            user_id: order.user_id,
             code: order.code.clone(),
         });
     }
-    settle_sell_cash(connection, &order.user_id, proceeds, fill.filled_at).map_err(|source| {
+    settle_sell_cash(connection, order.user_id, proceeds, fill.filled_at).map_err(|source| {
         TradingStoreError::MatchOrders {
             code: order.code.clone(),
             source,

@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--window-ms",
         type=int,
-        default=3000,
+        default=2000,
         help="Search window before and after each L1 timestamp, default: %(default)s.",
     )
     parser.add_argument(

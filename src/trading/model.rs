@@ -11,7 +11,9 @@ pub const STATUS_CANCELED: &str = "canceled";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Account {
-    pub user_id: String,
+    pub user_id: i64,
+    pub username: String,
+    pub password: String,
     pub cash_balance: i64,
     pub available_cash: i64,
     pub frozen_cash: i64,
@@ -21,7 +23,7 @@ pub struct Account {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Position {
-    pub user_id: String,
+    pub user_id: i64,
     pub code: String,
     pub long_qty: i64,
     pub available_qty: i64,
@@ -33,7 +35,7 @@ pub struct Position {
 #[derive(Debug, Clone, Serialize)]
 pub struct TradingOrder {
     pub order_id: String,
-    pub user_id: String,
+    pub user_id: i64,
     pub code: String,
     pub side: String,
     pub order_type: String,
@@ -49,7 +51,7 @@ pub struct TradingOrder {
 pub struct Fill {
     pub fill_id: String,
     pub order_id: String,
-    pub user_id: String,
+    pub user_id: i64,
     pub code: String,
     pub side: String,
     pub price: i64,
@@ -59,13 +61,20 @@ pub struct Fill {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateAccountRequest {
-    pub user_id: String,
+    pub username: String,
+    pub password: String,
     pub initial_cash: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateLimitOrderRequest {
-    pub user_id: String,
+    pub user_id: i64,
     pub code: String,
     pub side: String,
     pub price: i64,
@@ -74,6 +83,6 @@ pub struct CreateLimitOrderRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CancelOrderRequest {
-    pub user_id: String,
+    pub user_id: i64,
     pub order_id: String,
 }

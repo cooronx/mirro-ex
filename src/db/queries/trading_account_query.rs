@@ -2,36 +2,38 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::trading::Account;
 
-pub fn insert_account(connection: &Connection, account: &Account) -> rusqlite::Result<()> {
+pub fn insert_account(
+    connection: &Connection,
+    username: &str,
+    password: &str,
+    initial_cash: i64,
+    created_at: i64,
+) -> rusqlite::Result<i64> {
     connection.execute(
         "INSERT INTO accounts (
-            user_id,
+            username,
+            password,
             cash_balance,
             available_cash,
             frozen_cash,
             created_at,
             updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            &account.user_id,
-            account.cash_balance,
-            account.available_cash,
-            account.frozen_cash,
-            account.created_at,
-            account.updated_at,
-        ],
+        ) VALUES (?1, ?2, ?3, ?3, 0, ?4, ?4)",
+        params![username, password, initial_cash, created_at],
     )?;
-    Ok(())
+    Ok(connection.last_insert_rowid())
 }
 
 pub fn query_account_by_user_id(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
 ) -> rusqlite::Result<Option<Account>> {
     connection
         .query_row(
             "SELECT
                 user_id,
+                username,
+                password,
                 cash_balance,
                 available_cash,
                 frozen_cash,
@@ -43,11 +45,47 @@ pub fn query_account_by_user_id(
             |row| {
                 Ok(Account {
                     user_id: row.get(0)?,
-                    cash_balance: row.get(1)?,
-                    available_cash: row.get(2)?,
-                    frozen_cash: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    username: row.get(1)?,
+                    password: row.get(2)?,
+                    cash_balance: row.get(3)?,
+                    available_cash: row.get(4)?,
+                    frozen_cash: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+}
+
+pub fn query_account_by_username(
+    connection: &Connection,
+    username: &str,
+) -> rusqlite::Result<Option<Account>> {
+    connection
+        .query_row(
+            "SELECT
+                user_id,
+                username,
+                password,
+                cash_balance,
+                available_cash,
+                frozen_cash,
+                created_at,
+                updated_at
+             FROM accounts
+             WHERE username = ?1",
+            params![username],
+            |row| {
+                Ok(Account {
+                    user_id: row.get(0)?,
+                    username: row.get(1)?,
+                    password: row.get(2)?,
+                    cash_balance: row.get(3)?,
+                    available_cash: row.get(4)?,
+                    frozen_cash: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )
@@ -56,7 +94,7 @@ pub fn query_account_by_user_id(
 
 pub fn freeze_cash(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     amount: i64,
     updated_at: i64,
 ) -> rusqlite::Result<usize> {
@@ -73,7 +111,7 @@ pub fn freeze_cash(
 
 pub fn settle_buy_cash(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     frozen_release: i64,
     cash_cost: i64,
     updated_at: i64,
@@ -92,7 +130,7 @@ pub fn settle_buy_cash(
 
 pub fn settle_sell_cash(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     proceeds: i64,
     updated_at: i64,
 ) -> rusqlite::Result<usize> {
@@ -108,7 +146,7 @@ pub fn settle_sell_cash(
 
 pub fn release_cash(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     amount: i64,
     updated_at: i64,
 ) -> rusqlite::Result<usize> {

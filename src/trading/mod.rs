@@ -6,8 +6,8 @@ mod util;
 
 pub use error::TradingStoreError;
 pub use model::{
-    Account, CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, Fill, Position,
-    SIDE_BUY, SIDE_SELL, TradingOrder,
+    Account, CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, Fill, LoginRequest,
+    Position, SIDE_BUY, SIDE_SELL, TradingOrder,
 };
 pub use store::TradingStore;
 pub use util::trading_db_path_from_config;

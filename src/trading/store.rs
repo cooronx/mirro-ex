@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 
 use crate::db::queries::trading_account_query::{
-    freeze_cash, insert_account, query_account_by_user_id, release_cash,
+    freeze_cash, insert_account, query_account_by_user_id, query_account_by_username, release_cash,
 };
 use crate::db::queries::trading_fill_query::insert_fill;
 use crate::db::queries::trading_order_query::{
@@ -20,7 +20,7 @@ use crate::webdata::{AppEvent, EventBus};
 use super::error::{StoreResult, TradingStoreError};
 use super::matching::{apply_fill, planned_fills_from_levels};
 use super::model::{
-    Account, CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, Fill,
+    Account, CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, Fill, LoginRequest,
     ORDER_TYPE_LIMIT, Position, SIDE_BUY, SIDE_SELL, STATUS_CANCELED, STATUS_FILLED, STATUS_NEW,
     STATUS_PARTIALLY_FILLED, STATUS_WORKING, TradingOrder,
 };
@@ -51,52 +51,76 @@ impl TradingStore {
     }
 
     pub fn create_account(&self, request: CreateAccountRequest) -> StoreResult<Account> {
-        let user_id = request.user_id;
-        if user_id.is_empty() {
-            return Err(TradingStoreError::EmptyUserId);
+        let username = request.username.trim().to_string();
+        let password = request.password.trim().to_string();
+        if username.is_empty() {
+            return Err(TradingStoreError::EmptyUsername);
+        }
+        if password.is_empty() {
+            return Err(TradingStoreError::EmptyPassword);
         }
         if request.initial_cash < 0 {
             return Err(TradingStoreError::InvalidInitialCash);
         }
 
         let now_ms = current_unix_timestamp_ms();
-        let account = Account {
-            user_id: user_id.clone(),
-            cash_balance: request.initial_cash,
-            available_cash: request.initial_cash,
-            frozen_cash: 0,
-            created_at: now_ms,
-            updated_at: now_ms,
-        };
-
         let connection = self.open_connection()?;
-        match insert_account(&connection, &account) {
-            Ok(()) => Ok(account),
+        match insert_account(
+            &connection,
+            &username,
+            &password,
+            request.initial_cash,
+            now_ms,
+        ) {
+            Ok(user_id) => Ok(Account {
+                user_id,
+                username,
+                password,
+                cash_balance: request.initial_cash,
+                available_cash: request.initial_cash,
+                frozen_cash: 0,
+                created_at: now_ms,
+                updated_at: now_ms,
+            }),
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Err(TradingStoreError::AccountAlreadyExists { user_id })
+                Err(TradingStoreError::AccountAlreadyExists { username })
             }
-            Err(source) => Err(TradingStoreError::CreateAccount { user_id, source }),
+            Err(source) => Err(TradingStoreError::CreateAccount { username, source }),
         }
     }
 
-    pub fn get_account(&self, user_id: &str) -> StoreResult<Account> {
-        if user_id.is_empty() {
-            return Err(TradingStoreError::EmptyUserId);
+    pub fn login(&self, request: LoginRequest) -> StoreResult<Account> {
+        let username = request.username.trim().to_string();
+        let password = request.password.trim().to_string();
+        if username.is_empty() {
+            return Err(TradingStoreError::EmptyUsername);
+        }
+        if password.is_empty() {
+            return Err(TradingStoreError::EmptyPassword);
         }
 
         let connection = self.open_connection()?;
-        let account = query_account_by_user_id(&connection, user_id).map_err(|source| {
-            TradingStoreError::QueryAccount {
-                user_id: user_id.to_string(),
-                source,
-            }
-        })?;
+        let account = query_account_by_username(&connection, &username)
+            .map_err(|source| TradingStoreError::QueryAccountByUsername { username, source })?;
 
-        account.ok_or_else(|| TradingStoreError::AccountNotFound {
-            user_id: user_id.to_string(),
-        })
+        match account {
+            Some(account) if account.password == password => Ok(account),
+            _ => Err(TradingStoreError::InvalidCredentials),
+        }
+    }
+
+    pub fn get_account(&self, user_id: i64) -> StoreResult<Account> {
+        if user_id <= 0 {
+            return Err(TradingStoreError::InvalidUserId);
+        }
+
+        let connection = self.open_connection()?;
+        let account = query_account_by_user_id(&connection, user_id)
+            .map_err(|source| TradingStoreError::QueryAccount { user_id, source })?;
+
+        account.ok_or(TradingStoreError::AccountNotFound { user_id })
     }
 
     pub fn create_limit_order(
@@ -104,11 +128,11 @@ impl TradingStore {
         request: CreateLimitOrderRequest,
         sim_now_ms: i64,
     ) -> StoreResult<TradingOrder> {
-        let user_id = request.user_id.trim().to_string();
+        let user_id = request.user_id;
         let code = request.code.trim().to_string();
         let side = normalize_side(&request.side)?;
-        if user_id.is_empty() {
-            return Err(TradingStoreError::EmptyUserId);
+        if user_id <= 0 {
+            return Err(TradingStoreError::InvalidUserId);
         }
         if code.is_empty() {
             return Err(TradingStoreError::EmptyCode);
@@ -146,7 +170,7 @@ impl TradingStore {
         match side.as_str() {
             SIDE_BUY => {
                 let frozen_cash = checked_amount(order.price, order.qty)?;
-                if freeze_cash(&tx, &user_id, frozen_cash, sim_now_ms).map_err(|source| {
+                if freeze_cash(&tx, user_id, frozen_cash, sim_now_ms).map_err(|source| {
                     TradingStoreError::CreateOrder {
                         user_id: user_id.clone(),
                         code: code.clone(),
@@ -158,7 +182,7 @@ impl TradingStore {
                 }
             }
             SIDE_SELL => {
-                if freeze_position(&tx, &user_id, &code, order.qty, sim_now_ms).map_err(
+                if freeze_position(&tx, user_id, &code, order.qty, sim_now_ms).map_err(
                     |source| TradingStoreError::CreateOrder {
                         user_id: user_id.clone(),
                         code: code.clone(),
@@ -185,43 +209,32 @@ impl TradingStore {
             })?;
 
         bump_order_activity_epoch();
-        self.publish_trading_changed(Some(order.user_id.clone()));
+        self.publish_trading_changed(Some(order.user_id));
         Ok(order)
     }
 
-    pub fn list_orders(&self, user_id: &str) -> StoreResult<Vec<TradingOrder>> {
-        if user_id.is_empty() {
-            return Err(TradingStoreError::EmptyUserId);
+    pub fn list_orders(&self, user_id: i64) -> StoreResult<Vec<TradingOrder>> {
+        if user_id <= 0 {
+            return Err(TradingStoreError::InvalidUserId);
         }
 
         let connection = self.open_connection()?;
-        query_orders_by_user_id(&connection, user_id).map_err(|source| {
-            TradingStoreError::QueryOrders {
-                user_id: user_id.to_string(),
-                source,
-            }
-        })
+        query_orders_by_user_id(&connection, user_id)
+            .map_err(|source| TradingStoreError::QueryOrders { user_id, source })
     }
 
-    pub fn list_positions(&self, user_id: &str, code: Option<&str>) -> StoreResult<Vec<Position>> {
-        if user_id.is_empty() {
-            return Err(TradingStoreError::EmptyUserId);
+    pub fn list_positions(&self, user_id: i64, code: Option<&str>) -> StoreResult<Vec<Position>> {
+        if user_id <= 0 {
+            return Err(TradingStoreError::InvalidUserId);
         }
 
         let connection = self.open_connection()?;
         match code.map(str::trim).filter(|code| !code.is_empty()) {
             Some(code) => query_position(&connection, user_id, code)
                 .map(|position| position.into_iter().collect())
-                .map_err(|source| TradingStoreError::QueryPositions {
-                    user_id: user_id.to_string(),
-                    source,
-                }),
-            None => query_positions_by_user_id(&connection, user_id).map_err(|source| {
-                TradingStoreError::QueryPositions {
-                    user_id: user_id.to_string(),
-                    source,
-                }
-            }),
+                .map_err(|source| TradingStoreError::QueryPositions { user_id, source }),
+            None => query_positions_by_user_id(&connection, user_id)
+                .map_err(|source| TradingStoreError::QueryPositions { user_id, source }),
         }
     }
 
@@ -230,10 +243,10 @@ impl TradingStore {
         request: CancelOrderRequest,
         sim_now_ms: i64,
     ) -> StoreResult<TradingOrder> {
-        let user_id = request.user_id.trim().to_string();
+        let user_id = request.user_id;
         let order_id = request.order_id.trim().to_string();
-        if user_id.is_empty() {
-            return Err(TradingStoreError::EmptyUserId);
+        if user_id <= 0 {
+            return Err(TradingStoreError::InvalidUserId);
         }
         if order_id.is_empty() {
             return Err(TradingStoreError::OrderNotFound { user_id, order_id });
@@ -270,7 +283,7 @@ impl TradingStore {
         match order.side.as_str() {
             SIDE_BUY => {
                 let release_amount = checked_amount(order.price, open_qty)?;
-                if release_cash(&tx, &user_id, release_amount, sim_now_ms).map_err(|source| {
+                if release_cash(&tx, user_id, release_amount, sim_now_ms).map_err(|source| {
                     TradingStoreError::CancelOrder {
                         user_id: user_id.clone(),
                         order_id: order.order_id.clone(),
@@ -282,7 +295,7 @@ impl TradingStore {
                 }
             }
             SIDE_SELL => {
-                if release_position(&tx, &user_id, &order.code, open_qty, sim_now_ms).map_err(
+                if release_position(&tx, user_id, &order.code, open_qty, sim_now_ms).map_err(
                     |source| TradingStoreError::CancelOrder {
                         user_id: user_id.clone(),
                         order_id: order.order_id.clone(),
@@ -325,7 +338,7 @@ impl TradingStore {
             })?;
 
         bump_order_activity_epoch();
-        self.publish_trading_changed(Some(canceled_order.user_id.clone()));
+        self.publish_trading_changed(Some(canceled_order.user_id));
         Ok(canceled_order)
     }
 
@@ -364,7 +377,7 @@ impl TradingStore {
             let fill = Fill {
                 fill_id: next_id("fill", timestamp_ms, &FILL_COUNTER),
                 order_id: order.order_id.clone(),
-                user_id: order.user_id.clone(),
+                user_id: order.user_id,
                 code: order.code.clone(),
                 side: order.side.clone(),
                 price: fill_price,
@@ -399,7 +412,7 @@ impl TradingStore {
                 source,
             })?;
         if fill_count > 0 {
-            self.publish_trading_changed(Some(order.user_id.clone()));
+            self.publish_trading_changed(Some(order.user_id));
         }
         let queue_ahead_qty = (filled_qty < order.qty).then_some(queue_ahead_qty);
         Ok((fill_count, queue_ahead_qty))
@@ -456,7 +469,7 @@ impl TradingStore {
                 let fill = Fill {
                     fill_id: next_id("fill", timestamp_ms, &FILL_COUNTER),
                     order_id: order.order_id.clone(),
-                    user_id: order.user_id.clone(),
+                    user_id: order.user_id,
                     code: order.code.clone(),
                     side: order.side.clone(),
                     price,
@@ -507,7 +520,7 @@ impl TradingStore {
         })
     }
 
-    fn publish_trading_changed(&self, user_id: Option<String>) {
+    fn publish_trading_changed(&self, user_id: Option<i64>) {
         if let Some(event_bus) = &self.event_bus {
             event_bus.publish(AppEvent::TradingChanged { user_id });
         }

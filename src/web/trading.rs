@@ -8,7 +8,7 @@ use tokio::task;
 use crate::replay::ReplayRuntimeState;
 use crate::replay_manager::ReplayManager;
 use crate::trading::{
-    CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, TradingStore,
+    CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, LoginRequest, TradingStore,
     TradingStoreError,
 };
 
@@ -21,12 +21,15 @@ const TRADING_INVALID_ORDER_REQUEST_CODE: i32 = 2003;
 const TRADING_INVALID_ORDER_QUERY_CODE: i32 = 2004;
 const TRADING_INVALID_CANCEL_ORDER_REQUEST_CODE: i32 = 2005;
 const TRADING_INVALID_POSITION_QUERY_CODE: i32 = 2006;
-const TRADING_EMPTY_USER_ID_CODE: i32 = 2101;
+const TRADING_INVALID_LOGIN_REQUEST_CODE: i32 = 2007;
+const TRADING_INVALID_USER_ID_CODE: i32 = 2101;
 const TRADING_INVALID_INITIAL_CASH_CODE: i32 = 2102;
 const TRADING_INVALID_ORDER_CODE: i32 = 2103;
 const TRADING_INVALID_PRICE_CODE: i32 = 2104;
 const TRADING_INVALID_QTY_CODE: i32 = 2105;
 const TRADING_UNSUPPORTED_SIDE_CODE: i32 = 2106;
+const TRADING_EMPTY_USERNAME_CODE: i32 = 2107;
+const TRADING_EMPTY_PASSWORD_CODE: i32 = 2108;
 const TRADING_REPLAY_NOT_RUNNING_CODE: i32 = 2201;
 const TRADING_INSUFFICIENT_CASH_CODE: i32 = 2301;
 const TRADING_INSUFFICIENT_POSITION_CODE: i32 = 2302;
@@ -34,12 +37,16 @@ const TRADING_ACCOUNT_ALREADY_EXISTS_CODE: i32 = 2409;
 const TRADING_ACCOUNT_NOT_FOUND_CODE: i32 = 2404;
 const TRADING_ORDER_NOT_FOUND_CODE: i32 = 2405;
 const TRADING_ORDER_NOT_CANCELABLE_CODE: i32 = 2406;
+const TRADING_INVALID_CREDENTIALS_CODE: i32 = 2407;
 const TRADING_INTERNAL_STORE_CODE: i32 = 2500;
 const TRADING_INTERNAL_TASK_CODE: i32 = 2501;
 
 pub fn router(trading_store: Arc<TradingStore>, replay_manager: Arc<ReplayManager>) -> Router {
     Router::with_path("trading")
         .push(Router::with_path("accounts").post(CreateAccountHandler {
+            trading_store: trading_store.clone(),
+        }))
+        .push(Router::with_path("login").post(LoginHandler {
             trading_store: trading_store.clone(),
         }))
         .push(Router::with_path("accounts").get(GetAccountHandler {
@@ -61,17 +68,17 @@ pub fn router(trading_store: Arc<TradingStore>, replay_manager: Arc<ReplayManage
 
 #[derive(Debug, Deserialize)]
 struct GetAccountQuery {
-    user_id: String,
+    user_id: i64,
 }
 
 #[derive(Debug, Deserialize)]
 struct GetOrdersQuery {
-    user_id: String,
+    user_id: i64,
 }
 
 #[derive(Debug, Deserialize)]
 struct GetPositionsQuery {
-    user_id: String,
+    user_id: i64,
     code: Option<String>,
 }
 
@@ -80,6 +87,10 @@ struct CreateAccountHandler {
 }
 
 struct GetAccountHandler {
+    trading_store: Arc<TradingStore>,
+}
+
+struct LoginHandler {
     trading_store: Arc<TradingStore>,
 }
 
@@ -155,7 +166,7 @@ impl Handler for GetAccountHandler {
         };
 
         let trading_store = self.trading_store.clone();
-        match task::spawn_blocking(move || trading_store.get_account(&query.user_id)).await {
+        match task::spawn_blocking(move || trading_store.get_account(query.user_id)).await {
             Ok(Ok(account)) => res.render(Json(ApiResponse::success(account))),
             Ok(Err(err)) => render_trading_error(res, err),
             Err(err) => {
@@ -163,6 +174,41 @@ impl Handler for GetAccountHandler {
                     res,
                     TRADING_INTERNAL_TASK_CODE,
                     format!("account query task join failed: {err}"),
+                );
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Handler for LoginHandler {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        _depot: &mut Depot,
+        res: &mut Response,
+        _ctrl: &mut FlowCtrl,
+    ) {
+        let Some(request) = parse_json_body::<LoginRequest>(
+            req,
+            res,
+            TRADING_INVALID_LOGIN_REQUEST_CODE,
+            "invalid login request",
+        )
+        .await
+        else {
+            return;
+        };
+
+        let trading_store = self.trading_store.clone();
+        match task::spawn_blocking(move || trading_store.login(request)).await {
+            Ok(Ok(account)) => res.render(Json(ApiResponse::success(account))),
+            Ok(Err(err)) => render_trading_error(res, err),
+            Err(err) => {
+                render_api_error(
+                    res,
+                    TRADING_INTERNAL_TASK_CODE,
+                    format!("login task join failed: {err}"),
                 );
             }
         }
@@ -245,7 +291,7 @@ impl Handler for GetOrdersHandler {
         };
 
         let trading_store = self.trading_store.clone();
-        match task::spawn_blocking(move || trading_store.list_orders(&query.user_id)).await {
+        match task::spawn_blocking(move || trading_store.list_orders(query.user_id)).await {
             Ok(Ok(orders)) => res.render(Json(ApiResponse::success(orders))),
             Ok(Err(err)) => render_trading_error(res, err),
             Err(err) => {
@@ -279,7 +325,7 @@ impl Handler for GetPositionsHandler {
 
         let trading_store = self.trading_store.clone();
         match task::spawn_blocking(move || {
-            trading_store.list_positions(&query.user_id, query.code.as_deref())
+            trading_store.list_positions(query.user_id, query.code.as_deref())
         })
         .await
         {
@@ -353,7 +399,9 @@ impl Handler for CancelOrderHandler {
 
 fn render_trading_error(res: &mut Response, err: TradingStoreError) {
     let code = match err {
-        TradingStoreError::EmptyUserId => TRADING_EMPTY_USER_ID_CODE,
+        TradingStoreError::InvalidUserId => TRADING_INVALID_USER_ID_CODE,
+        TradingStoreError::EmptyUsername => TRADING_EMPTY_USERNAME_CODE,
+        TradingStoreError::EmptyPassword => TRADING_EMPTY_PASSWORD_CODE,
         TradingStoreError::EmptyCode => TRADING_INVALID_ORDER_CODE,
         TradingStoreError::InvalidInitialCash => TRADING_INVALID_INITIAL_CASH_CODE,
         TradingStoreError::InvalidPrice => TRADING_INVALID_PRICE_CODE,
@@ -363,12 +411,14 @@ fn render_trading_error(res: &mut Response, err: TradingStoreError) {
         TradingStoreError::InsufficientPosition { .. } => TRADING_INSUFFICIENT_POSITION_CODE,
         TradingStoreError::AccountAlreadyExists { .. } => TRADING_ACCOUNT_ALREADY_EXISTS_CODE,
         TradingStoreError::AccountNotFound { .. } => TRADING_ACCOUNT_NOT_FOUND_CODE,
+        TradingStoreError::InvalidCredentials => TRADING_INVALID_CREDENTIALS_CODE,
         TradingStoreError::OrderNotFound { .. } => TRADING_ORDER_NOT_FOUND_CODE,
         TradingStoreError::OrderNotCancelable { .. } => TRADING_ORDER_NOT_CANCELABLE_CODE,
         TradingStoreError::AmountOverflow => TRADING_INTERNAL_STORE_CODE,
         TradingStoreError::OpenConnection { .. }
         | TradingStoreError::CreateAccount { .. }
         | TradingStoreError::QueryAccount { .. }
+        | TradingStoreError::QueryAccountByUsername { .. }
         | TradingStoreError::CreateOrder { .. }
         | TradingStoreError::CancelOrder { .. }
         | TradingStoreError::QueryOrders { .. }

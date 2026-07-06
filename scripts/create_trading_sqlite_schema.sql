@@ -5,7 +5,9 @@ BEGIN;
 -- accounts:
 -- 每个用户一行，保存当前资金状态。
 CREATE TABLE IF NOT EXISTS accounts (
-    user_id TEXT PRIMARY KEY,
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
     cash_balance INTEGER NOT NULL CHECK (cash_balance >= 0),
     available_cash INTEGER NOT NULL CHECK (available_cash >= 0),
     frozen_cash INTEGER NOT NULL CHECK (frozen_cash >= 0),
@@ -18,7 +20,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 -- 每个用户、每个标的一行，保存当前持仓状态。
 -- 数量字段统一使用“股/份”整数，价格字段统一使用 1e-4 精度整数。
 CREATE TABLE IF NOT EXISTS positions (
-    user_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
     code TEXT NOT NULL,
     long_qty INTEGER NOT NULL CHECK (long_qty >= 0),
     available_qty INTEGER NOT NULL CHECK (available_qty >= 0),
@@ -37,7 +39,7 @@ CREATE TABLE IF NOT EXISTS positions (
 -- side 第一版最小集合：buy / sell
 CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
     code TEXT NOT NULL,
     side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
     order_type TEXT NOT NULL CHECK (order_type IN ('limit', 'market')),
@@ -57,7 +59,7 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS fills (
     fill_id TEXT PRIMARY KEY,
     order_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
     code TEXT NOT NULL,
     side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
     price INTEGER NOT NULL CHECK (price >= 0),
@@ -68,6 +70,7 @@ CREATE TABLE IF NOT EXISTS fills (
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
 CREATE INDEX IF NOT EXISTS idx_orders_user_status_created_at
     ON orders(user_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_code_status_created_at

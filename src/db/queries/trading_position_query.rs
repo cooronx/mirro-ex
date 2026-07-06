@@ -4,7 +4,7 @@ use crate::trading::Position;
 
 pub fn query_positions_by_user_id(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
 ) -> rusqlite::Result<Vec<Position>> {
     let mut statement = connection.prepare(
         "SELECT
@@ -25,7 +25,7 @@ pub fn query_positions_by_user_id(
 
 pub fn query_position(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     code: &str,
 ) -> rusqlite::Result<Option<Position>> {
     connection
@@ -49,7 +49,7 @@ pub fn query_position(
 
 pub fn freeze_position(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     code: &str,
     qty: i64,
     updated_at: i64,
@@ -68,7 +68,7 @@ pub fn freeze_position(
 
 pub fn apply_buy_fill(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     code: &str,
     price: i64,
     qty: i64,
@@ -116,7 +116,7 @@ pub fn apply_buy_fill(
 
 pub fn apply_sell_fill(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     code: &str,
     qty: i64,
     updated_at: i64,
@@ -136,7 +136,7 @@ pub fn apply_sell_fill(
 
 pub fn release_position(
     connection: &Connection,
-    user_id: &str,
+    user_id: i64,
     code: &str,
     qty: i64,
     updated_at: i64,

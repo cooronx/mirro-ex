@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 pub enum AppEvent {
     ReplayChanged,
     MarketChanged { code: String },
-    TradingChanged { user_id: Option<String> },
+    TradingChanged { user_id: Option<i64> },
 }
 
 impl AppEvent {
