@@ -1169,7 +1169,7 @@ async function handleCreateOrder() {
   busy.order = true;
   try {
     const order = await createOrder({
-      user_id: String(currentUserId.value),
+      user_id: currentUserId.value,
       code: normalizedCode,
       side: orderForm.side,
       price,
@@ -1200,7 +1200,7 @@ async function handleCancelOrder(order: TradingOrder) {
   cancelingOrderId.value = order.order_id;
   try {
     const canceled = await cancelOrder({
-      user_id: String(currentUserId.value),
+      user_id: currentUserId.value,
       order_id: order.order_id
     });
     orderMessageTheme.value = 'success';

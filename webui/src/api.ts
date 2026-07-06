@@ -116,7 +116,7 @@ export interface Account {
 
 export interface TradingOrder {
   order_id: string;
-  user_id: string;
+  user_id: number;
   code: string;
   side: 'buy' | 'sell' | string;
   order_type: string;
@@ -129,7 +129,7 @@ export interface TradingOrder {
 }
 
 export interface TradingPosition {
-  user_id: string;
+  user_id: number;
   code: string;
   long_qty: number;
   available_qty: number;
@@ -141,7 +141,7 @@ export interface TradingPosition {
 export type AppEvent =
   | { type: 'replay_changed' }
   | { type: 'market_changed'; code: string }
-  | { type: 'trading_changed'; user_id: string | null };
+  | { type: 'trading_changed'; user_id: number | null };
 
 const API_ERROR_MESSAGES: Record<number, string> = {
   1000: '回放启动参数无效',
@@ -290,7 +290,7 @@ export function getPositions(userId: string, code?: string) {
 }
 
 export function createOrder(payload: {
-  user_id: string;
+  user_id: number;
   code: string;
   side: string;
   price: number;
@@ -299,7 +299,7 @@ export function createOrder(payload: {
   return request<TradingOrder>('/trading/orders', jsonPost(payload));
 }
 
-export function cancelOrder(payload: { user_id: string; order_id: string }) {
+export function cancelOrder(payload: { user_id: number; order_id: string }) {
   return request<TradingOrder>('/trading/orders/cancel', jsonPost(payload));
 }
 
