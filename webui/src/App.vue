@@ -477,6 +477,8 @@ let pendingReplayConfigRefresh = false;
 let marketRequestSeq = 0;
 
 const intradayCaches = reactive<Record<string, IntradayCache>>({});
+const DEFAULT_REPLAY_START_TIME = '09:15:00';
+const DEFAULT_REPLAY_END_TIME = '15:00:00';
 
 const authForm = reactive({
   username: '',
@@ -487,8 +489,8 @@ const authForm = reactive({
 const replayForm = reactive({
   replay_start_date: '',
   replay_end_date: '',
-  replay_start_time: '',
-  replay_end_time: '',
+  replay_start_time: DEFAULT_REPLAY_START_TIME,
+  replay_end_time: DEFAULT_REPLAY_END_TIME,
   replay_speed: 1,
   skip_intraday_breaks: true
 });
