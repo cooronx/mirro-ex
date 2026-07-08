@@ -78,6 +78,12 @@ pub enum TradingStoreError {
         #[source]
         source: rusqlite::Error,
     },
+    #[error("failed to query fills for user_id={user_id}")]
+    QueryFills {
+        user_id: i64,
+        #[source]
+        source: rusqlite::Error,
+    },
     #[error("failed to query positions for user_id={user_id}")]
     QueryPositions {
         user_id: i64,

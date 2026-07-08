@@ -146,6 +146,47 @@ fn buy_limit_order_matches_ask_and_updates_account_position() {
 }
 
 #[test]
+fn list_fills_returns_user_fills_newest_first() {
+    let (store, path) = test_store("list-fills");
+    let user_id = create_test_account(&store, "u1", 10_000);
+    let order = store
+        .create_limit_order(
+            CreateLimitOrderRequest {
+                user_id,
+                code: "300274.XSHE".to_string(),
+                side: "buy".to_string(),
+                price: 100,
+                qty: 10,
+            },
+            1_000,
+        )
+        .unwrap();
+
+    store
+        .initialize_limit_order_queue(
+            &order,
+            &[LevelSnapshot {
+                price: 90,
+                total_qty: 5,
+                order_count: 1,
+            }],
+            0,
+            1_100,
+        )
+        .unwrap();
+
+    let fills = store.list_fills(user_id).unwrap();
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].order_id, order.order_id);
+    assert_eq!(fills[0].code, "300274.XSHE");
+    assert_eq!(fills[0].side, SIDE_BUY);
+    assert_eq!(fills[0].price, 90);
+    assert_eq!(fills[0].qty, 5);
+    assert_eq!(fills[0].filled_at, 1_100);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn sell_limit_order_freezes_position_and_settles_fill() {
     let (store, path) = test_store("sell-fill");
     let user_id = create_test_account(&store, "u1", 1_000);

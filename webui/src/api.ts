@@ -128,6 +128,17 @@ export interface TradingOrder {
   updated_at: number;
 }
 
+export interface TradingFill {
+  fill_id: string;
+  order_id: string;
+  user_id: number;
+  code: string;
+  side: 'buy' | 'sell' | string;
+  price: number;
+  qty: number;
+  filled_at: number;
+}
+
 export interface TradingPosition {
   user_id: number;
   code: string;
@@ -165,6 +176,7 @@ const API_ERROR_MESSAGES: Record<number, string> = {
   2005: '撤单请求无效',
   2006: '持仓查询请求无效',
   2007: '登录请求无效',
+  2008: '成交查询请求无效',
   2101: '请输入 user_id',
   2102: '初始资金必须大于 0',
   2103: '请输入标的代码',
@@ -279,6 +291,10 @@ export function createAccount(payload: { username: string; password: string; ini
 
 export function getOrders(userId: string) {
   return request<TradingOrder[]>(`/trading/orders?user_id=${encodeURIComponent(userId)}`);
+}
+
+export function getFills(userId: string) {
+  return request<TradingFill[]>(`/trading/fills?user_id=${encodeURIComponent(userId)}`);
 }
 
 export function getPositions(userId: string, code?: string) {

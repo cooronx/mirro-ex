@@ -339,7 +339,7 @@
         <div class="tab-card-head">
           <div>
             <span class="eyebrow">交易</span>
-            <h3>订单列表与撤单</h3>
+            <h3>订单列表</h3>
           </div>
           <t-button theme="primary" variant="outline" :loading="busy.orders" @click="refreshAccountAndOrders">刷新</t-button>
         </div>
@@ -351,6 +351,26 @@
           :columns="orderColumns"
           :loading="busy.orders"
           :pagination="orderPagination"
+        />
+      </t-card>
+    </section>
+
+    <section v-else-if="currentTab === 'fills'" class="tab-screen">
+      <t-card title="成交明细" bordered class="terminal-card tab-card">
+        <div class="tab-card-head">
+          <div>
+            <span class="eyebrow">成交</span>
+            <h3>成交明细</h3>
+          </div>
+          <t-button theme="primary" variant="outline" :loading="busy.fills" @click="refreshAccountAndOrders">刷新</t-button>
+        </div>
+        <t-table
+          row-key="fill_id"
+          size="small"
+          :data="fills"
+          :columns="fillColumns"
+          :loading="busy.fills"
+          :pagination="fillPagination"
         />
       </t-card>
     </section>
@@ -399,6 +419,7 @@ import {
   MarketSnapshot,
   ReplayConfig,
   ReplayStatus,
+  TradingFill,
   TradingOrder,
   TradingPosition,
   cancelOrder,
@@ -406,6 +427,7 @@ import {
   createAccount,
   createOrder,
   getAccount,
+  getFills,
   getMarketIntraday,
   getMarketSnapshot,
   getMarketSnapshots,
@@ -431,7 +453,7 @@ type IntradayCache = {
 };
 
 type AuthMode = 'login' | 'register';
-type AppTab = 'market' | 'trade' | 'portfolio';
+type AppTab = 'market' | 'trade' | 'fills' | 'portfolio';
 type SessionSnapshot = {
   user_id: number;
   username: string;
@@ -440,6 +462,7 @@ type SessionSnapshot = {
 const tabs: Array<{ id: AppTab; label: string }> = [
   { id: 'market', label: '行情' },
   { id: 'trade', label: '交易' },
+  { id: 'fills', label: '成交' },
   { id: 'portfolio', label: '持仓' }
 ];
 
@@ -458,6 +481,7 @@ const account = ref<Account | null>(null);
 const accountError = ref('');
 const positions = ref<TradingPosition[]>([]);
 const orders = ref<TradingOrder[]>([]);
+const fills = ref<TradingFill[]>([]);
 const orderMessage = ref('');
 const orderMessageTheme = ref<'success' | 'error'>('success');
 const authError = ref('');
@@ -509,6 +533,7 @@ const busy = reactive({
   order: false,
   positions: false,
   orders: false,
+  fills: false,
   cancelOrder: false
 });
 
@@ -555,6 +580,11 @@ const orderPagination = computed(() => ({
   defaultPageSize: 10,
   showJumper: true,
   total: orders.value.length
+}));
+const fillPagination = computed(() => ({
+  defaultPageSize: 10,
+  showJumper: true,
+  total: fills.value.length
 }));
 
 const orderColumns: TableProps['columns'] = [
@@ -633,6 +663,26 @@ const positionColumns: TableProps['columns'] = [
     title: '更新时间',
     width: 180,
     cell: (_h, { row }) => formatDateTime((row as TradingPosition).updated_at)
+  }
+];
+
+const fillColumns: TableProps['columns'] = [
+  { colKey: 'fill_id', title: '成交ID', width: 230, ellipsis: true },
+  { colKey: 'order_id', title: '订单ID', width: 230, ellipsis: true },
+  { colKey: 'code', title: '标的', width: 120 },
+  { colKey: 'side', title: '方向', width: 80 },
+  {
+    colKey: 'price',
+    title: '价格',
+    width: 110,
+    cell: (_h, { row }) => formatPrice((row as TradingFill).price)
+  },
+  { colKey: 'qty', title: '数量', width: 90 },
+  {
+    colKey: 'filled_at',
+    title: '成交时间',
+    width: 180,
+    cell: (_h, { row }) => formatDateTime((row as TradingFill).filled_at)
   }
 ];
 
@@ -983,26 +1033,31 @@ async function refreshAccountAndOrders(showLoading = true) {
   }
   busy.positions = true;
   busy.orders = true;
+  busy.fills = true;
   try {
     const userId = String(currentUserId.value);
-    const [nextAccount, nextPositions, nextOrders] = await Promise.all([
+    const [nextAccount, nextPositions, nextOrders, nextFills] = await Promise.all([
       getAccount(userId),
       getPositions(userId),
-      getOrders(userId)
+      getOrders(userId),
+      getFills(userId)
     ]);
     account.value = nextAccount;
     positions.value = nextPositions;
     orders.value = nextOrders;
+    fills.value = nextFills;
     accountError.value = '';
   } catch (error) {
     account.value = null;
     positions.value = [];
     orders.value = [];
+    fills.value = [];
     accountError.value = messageOf(error);
   } finally {
     busy.account = false;
     busy.positions = false;
     busy.orders = false;
+    busy.fills = false;
   }
 }
 
@@ -1076,6 +1131,7 @@ function handleLogout() {
   account.value = null;
   positions.value = [];
   orders.value = [];
+  fills.value = [];
   accountError.value = '';
   orderMessage.value = '';
   authError.value = '';

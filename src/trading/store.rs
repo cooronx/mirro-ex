@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use crate::db::queries::trading_account_query::{
     freeze_cash, insert_account, query_account_by_user_id, query_account_by_username, release_cash,
 };
-use crate::db::queries::trading_fill_query::insert_fill;
+use crate::db::queries::trading_fill_query::{insert_fill, query_fills_by_user_id};
 use crate::db::queries::trading_order_query::{
     insert_order, query_new_orders_by_code, query_order_by_id, query_orders_by_user_id,
     query_working_orders_by_code_price_side, update_order_fill, update_order_status,
@@ -221,6 +221,16 @@ impl TradingStore {
         let connection = self.open_connection()?;
         query_orders_by_user_id(&connection, user_id)
             .map_err(|source| TradingStoreError::QueryOrders { user_id, source })
+    }
+
+    pub fn list_fills(&self, user_id: i64) -> StoreResult<Vec<Fill>> {
+        if user_id <= 0 {
+            return Err(TradingStoreError::InvalidUserId);
+        }
+
+        let connection = self.open_connection()?;
+        query_fills_by_user_id(&connection, user_id)
+            .map_err(|source| TradingStoreError::QueryFills { user_id, source })
     }
 
     pub fn list_positions(&self, user_id: i64, code: Option<&str>) -> StoreResult<Vec<Position>> {

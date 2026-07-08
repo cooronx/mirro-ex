@@ -22,6 +22,7 @@ const TRADING_INVALID_ORDER_QUERY_CODE: i32 = 2004;
 const TRADING_INVALID_CANCEL_ORDER_REQUEST_CODE: i32 = 2005;
 const TRADING_INVALID_POSITION_QUERY_CODE: i32 = 2006;
 const TRADING_INVALID_LOGIN_REQUEST_CODE: i32 = 2007;
+const TRADING_INVALID_FILL_QUERY_CODE: i32 = 2008;
 const TRADING_INVALID_USER_ID_CODE: i32 = 2101;
 const TRADING_INVALID_INITIAL_CASH_CODE: i32 = 2102;
 const TRADING_INVALID_ORDER_CODE: i32 = 2103;
@@ -63,6 +64,9 @@ pub fn router(trading_store: Arc<TradingStore>, replay_manager: Arc<ReplayManage
         .push(Router::with_path("orders").get(GetOrdersHandler {
             trading_store: trading_store.clone(),
         }))
+        .push(Router::with_path("fills").get(GetFillsHandler {
+            trading_store: trading_store.clone(),
+        }))
         .push(Router::with_path("positions").get(GetPositionsHandler { trading_store }))
 }
 
@@ -73,6 +77,11 @@ struct GetAccountQuery {
 
 #[derive(Debug, Deserialize)]
 struct GetOrdersQuery {
+    user_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetFillsQuery {
     user_id: i64,
 }
 
@@ -105,6 +114,10 @@ struct CancelOrderHandler {
 }
 
 struct GetOrdersHandler {
+    trading_store: Arc<TradingStore>,
+}
+
+struct GetFillsHandler {
     trading_store: Arc<TradingStore>,
 }
 
@@ -306,6 +319,39 @@ impl Handler for GetOrdersHandler {
 }
 
 #[async_trait]
+impl Handler for GetFillsHandler {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        _depot: &mut Depot,
+        res: &mut Response,
+        _ctrl: &mut FlowCtrl,
+    ) {
+        let Some(query) = parse_query::<GetFillsQuery>(
+            req,
+            res,
+            TRADING_INVALID_FILL_QUERY_CODE,
+            "invalid fill query",
+        ) else {
+            return;
+        };
+
+        let trading_store = self.trading_store.clone();
+        match task::spawn_blocking(move || trading_store.list_fills(query.user_id)).await {
+            Ok(Ok(fills)) => res.render(Json(ApiResponse::success(fills))),
+            Ok(Err(err)) => render_trading_error(res, err),
+            Err(err) => {
+                render_api_error(
+                    res,
+                    TRADING_INTERNAL_TASK_CODE,
+                    format!("fill query task join failed: {err}"),
+                );
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl Handler for GetPositionsHandler {
     async fn handle(
         &self,
@@ -422,6 +468,7 @@ fn render_trading_error(res: &mut Response, err: TradingStoreError) {
         | TradingStoreError::CreateOrder { .. }
         | TradingStoreError::CancelOrder { .. }
         | TradingStoreError::QueryOrders { .. }
+        | TradingStoreError::QueryFills { .. }
         | TradingStoreError::QueryPositions { .. }
         | TradingStoreError::MatchOrders { .. } => TRADING_INTERNAL_STORE_CODE,
     };
