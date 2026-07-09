@@ -100,15 +100,22 @@ impl MarketState {
                 .get(code)
                 .map(|snapshot| snapshot.next_intraday_seq)
                 .unwrap_or(1);
-            let (intraday_points, next_intraday_seq) =
-                next_intraday_points(existing_points, existing_next_seq, timestamp_ms, last_price);
+            let auction_price = auction_price(snapshot, is_call_auction);
+            let auction_qty = auction_qty(snapshot, is_call_auction);
+            let chart_price = auction_price.or(last_price);
+            let (intraday_points, next_intraday_seq) = next_intraday_points(
+                existing_points,
+                existing_next_seq,
+                timestamp_ms,
+                chart_price,
+            );
             snapshots.insert(
                 code.to_string(),
                 MarketSnapshot {
                     timestamp_ms,
                     last_price,
-                    auction_price: auction_price(snapshot, is_call_auction),
-                    auction_qty: auction_qty(snapshot, is_call_auction),
+                    auction_price,
+                    auction_qty,
                     snapshot: snapshot.clone(),
                     intraday_points,
                     next_intraday_seq,
@@ -291,8 +298,35 @@ mod tests {
         assert_eq!(snapshot.asks[0].price, 100_000);
         assert_eq!(snapshot.asks[0].qty, 300);
         let intraday = state.intraday("300274.XSHE", 0).unwrap();
-        assert_eq!(intraday.points[0].price, 101_000);
+        assert_eq!(intraday.points[0].price, 100_000);
         assert!(state.get("600000.XSHG").is_none());
+    }
+
+    #[tokio::test]
+    async fn records_call_auction_price_as_intraday_point() {
+        let state = MarketState::new();
+        state.update(
+            "300274.XSHE",
+            1_000,
+            None,
+            true,
+            &OrderBookSnapshot {
+                bids: vec![LevelSnapshot {
+                    price: 100_000,
+                    total_qty: 200,
+                    order_count: 2,
+                }],
+                asks: vec![LevelSnapshot {
+                    price: 100_000,
+                    total_qty: 300,
+                    order_count: 3,
+                }],
+            },
+        );
+
+        let intraday = state.intraday("300274.XSHE", 0).unwrap();
+        assert_eq!(intraday.points.len(), 1);
+        assert_eq!(intraday.points[0].price, 100_000);
     }
 
     #[tokio::test]

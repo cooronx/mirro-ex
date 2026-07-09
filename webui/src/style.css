@@ -255,6 +255,7 @@ textarea {
 .market-screen {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
+  align-items: stretch;
   gap: 16px;
 }
 
@@ -356,8 +357,11 @@ textarea {
 
 .chart-panel {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
   gap: 16px;
   min-width: 0;
+  min-height: 720px;
 }
 
 .chart-topline h2 {
@@ -390,14 +394,19 @@ textarea {
 
 .market-main {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 290px;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  align-items: stretch;
   gap: 16px;
+  min-height: 0;
 }
 
 .chart-stack {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
   gap: 12px;
   min-width: 0;
+  min-height: 0;
 }
 
 .price-summary {
@@ -424,10 +433,10 @@ textarea {
 .price-chart {
   position: relative;
   width: 100%;
-  height: 460px;
+  min-height: 380px;
   overflow: hidden;
   border: 1px solid #e5eaf2;
-  border-radius: 18px;
+  border-radius: 12px;
   background: #ffffff;
 }
 
@@ -448,12 +457,13 @@ textarea {
 
 .trade-sidebar {
   display: grid;
+  align-content: start;
   gap: 12px;
 }
 
 .subpanel {
   border: 1px solid #e7edf6;
-  border-radius: 16px;
+  border-radius: 12px;
   background: #f8fafc;
   padding: 14px;
 }
@@ -517,12 +527,12 @@ textarea {
 }
 
 .last-price {
-  padding: 14px 0;
+  padding: 10px 0;
   border-radius: 12px;
   background: #ffffff;
   border: 1px solid #e3eaf5;
   color: #111827;
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 750;
   text-align: center;
 }
@@ -530,6 +540,26 @@ textarea {
 .order-form {
   display: grid;
   gap: 6px;
+}
+
+.account-order-entry {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid #e7edf6;
+}
+
+.account-order-entry .order-form {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.account-order-entry .order-form .t-button {
+  grid-column: auto;
+}
+
+.account-order-entry .t-alert {
+  margin-top: 0;
 }
 
 .market-footer {
@@ -707,6 +737,10 @@ dd {
   .market-main,
   .market-footer {
     grid-template-columns: 1fr;
+  }
+
+  .chart-panel {
+    min-height: 0;
   }
 
   .watchlist-panel {

@@ -175,28 +175,6 @@
                 </div>
               </div>
             </section>
-
-            <section class="subpanel order-entry-panel">
-              <div class="subpanel-title">下单面板</div>
-              <t-form label-align="top" class="order-form" @submit.prevent>
-                <t-form-item label="方向">
-                  <t-radio-group v-model="orderForm.side" variant="default-filled">
-                    <t-radio-button value="buy">买入</t-radio-button>
-                    <t-radio-button value="sell">卖出</t-radio-button>
-                  </t-radio-group>
-                </t-form-item>
-                <t-form-item label="价格">
-                  <t-input v-model="orderForm.price" placeholder="23.4600" />
-                </t-form-item>
-                <t-form-item label="数量">
-                  <t-input-number v-model="orderForm.qty" :min="1" theme="normal" />
-                </t-form-item>
-                <t-button block theme="primary" :loading="busy.order" @click="handleCreateOrder">
-                  {{ orderForm.side === 'buy' ? '提交买单' : '提交卖单' }}
-                </t-button>
-              </t-form>
-              <t-alert v-if="orderMessage" :theme="orderMessageTheme" :message="orderMessage" />
-            </section>
           </aside>
         </div>
 
@@ -325,6 +303,27 @@
               <dd>{{ formatMoney(account?.frozen_cash) }}</dd>
             </div>
           </dl>
+          <section class="account-order-entry">
+            <div class="subpanel-title">下单面板</div>
+            <t-form label-align="top" class="order-form" @submit.prevent>
+              <t-form-item label="方向">
+                <t-radio-group v-model="orderForm.side" variant="default-filled">
+                  <t-radio-button value="buy">买入</t-radio-button>
+                  <t-radio-button value="sell">卖出</t-radio-button>
+                </t-radio-group>
+              </t-form-item>
+              <t-form-item label="价格">
+                <t-input v-model="orderForm.price" placeholder="23.46" />
+              </t-form-item>
+              <t-form-item label="数量">
+                <t-input-number v-model="orderForm.qty" :min="1" theme="normal" />
+              </t-form-item>
+              <t-button block theme="primary" :loading="busy.order" @click="handleCreateOrder">
+                {{ orderForm.side === 'buy' ? '提交买单' : '提交卖单' }}
+              </t-button>
+            </t-form>
+            <t-alert v-if="orderMessage" :theme="orderMessageTheme" :message="orderMessage" />
+          </section>
           <div class="account-summary-foot">
             <span>更新时间 {{ formatTimeOnly(account?.updated_at) }}</span>
             <span>状态 {{ replayStatusText }}</span>
@@ -499,6 +498,8 @@ let marketRefreshTimer: number | null = null;
 let tradingRefreshTimer: number | null = null;
 let pendingReplayConfigRefresh = false;
 let marketRequestSeq = 0;
+let shouldFitPriceChart = true;
+let chartDataLength = 0;
 
 const intradayCaches = reactive<Record<string, IntradayCache>>({});
 const DEFAULT_REPLAY_START_TIME = '09:15:00';
@@ -710,6 +711,8 @@ watch(chartPoints, () => {
 watch(selectedCode, () => {
   marketSnapshot.value = null;
   marketError.value = '';
+  shouldFitPriceChart = true;
+  chartDataLength = 0;
   updatePriceChart();
   refreshMarket();
 });
@@ -1009,6 +1012,7 @@ function teardownPriceChart() {
   chart = null;
   lineSeries = null;
   chartHost = null;
+  chartDataLength = 0;
 }
 
 function updatePriceChart() {
@@ -1018,9 +1022,11 @@ function updatePriceChart() {
     value: rawPriceToHuman(point.price)
   }));
   lineSeries.setData(data);
-  if (data.length > 0) {
+  if (data.length > 0 && (shouldFitPriceChart || chartDataLength === 0)) {
     chart.timeScale().fitContent();
+    shouldFitPriceChart = false;
   }
+  chartDataLength = data.length;
 }
 
 async function refreshAccountAndOrders(showLoading = true) {
@@ -1173,6 +1179,8 @@ function resetMarketViewForReplayStart(replayCodes: string[]) {
   selectedCode.value = replayCodes[0] ?? '';
   marketSnapshot.value = null;
   marketError.value = '';
+  shouldFitPriceChart = true;
+  chartDataLength = 0;
   for (const cacheKey of Object.keys(intradayCaches)) {
     delete intradayCaches[cacheKey];
   }
