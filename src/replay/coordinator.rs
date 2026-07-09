@@ -312,6 +312,7 @@ impl ReplayCoordinator {
             } => {
                 Self::validate_lane_key(expected_lane_key, lane_key)?;
                 lane_runtime.ready_events.extend(events);
+                Self::sort_ready_events_by_market_time(lane_runtime);
                 lane_runtime.watermark_ms = watermark_ms;
                 lane_runtime.warmed_up = true;
             }
@@ -331,6 +332,13 @@ impl ReplayCoordinator {
         }
 
         Ok(())
+    }
+
+    fn sort_ready_events_by_market_time(lane_runtime: &mut LaneRuntime) {
+        lane_runtime
+            .ready_events
+            .make_contiguous()
+            .sort_by_key(|event| (event.timestamp_ms(), event.message_number()));
     }
 
     fn validate_lane_key(expected: LaneKey, actual: LaneKey) -> Result<()> {
