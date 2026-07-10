@@ -36,7 +36,11 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let router = Router::new()
         .push(events::router(event_bus))
         .push(replay::router(manager.clone()))
-        .push(trading::router(trading_store, manager))
+        .push(trading::router(
+            trading_store,
+            manager,
+            market_state.clone(),
+        ))
         .push(market::router(market_state))
         .push(static_files::router());
 

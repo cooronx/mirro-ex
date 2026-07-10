@@ -11,6 +11,7 @@ use crate::trading::{
     CancelOrderRequest, CreateAccountRequest, CreateLimitOrderRequest, LoginRequest, TradingStore,
     TradingStoreError,
 };
+use crate::webdata::MarketState;
 
 use super::common::{ApiResponse, parse_json_body, parse_query, render_api_error};
 
@@ -42,7 +43,11 @@ const TRADING_INVALID_CREDENTIALS_CODE: i32 = 2407;
 const TRADING_INTERNAL_STORE_CODE: i32 = 2500;
 const TRADING_INTERNAL_TASK_CODE: i32 = 2501;
 
-pub fn router(trading_store: Arc<TradingStore>, replay_manager: Arc<ReplayManager>) -> Router {
+pub fn router(
+    trading_store: Arc<TradingStore>,
+    replay_manager: Arc<ReplayManager>,
+    market_state: MarketState,
+) -> Router {
     Router::with_path("trading")
         .push(Router::with_path("accounts").post(CreateAccountHandler {
             trading_store: trading_store.clone(),
@@ -56,10 +61,12 @@ pub fn router(trading_store: Arc<TradingStore>, replay_manager: Arc<ReplayManage
         .push(Router::with_path("orders").post(CreateOrderHandler {
             trading_store: trading_store.clone(),
             replay_manager: replay_manager.clone(),
+            market_state: market_state.clone(),
         }))
         .push(Router::with_path("orders/cancel").post(CancelOrderHandler {
             trading_store: trading_store.clone(),
             replay_manager,
+            market_state,
         }))
         .push(Router::with_path("orders").get(GetOrdersHandler {
             trading_store: trading_store.clone(),
@@ -106,11 +113,13 @@ struct LoginHandler {
 struct CreateOrderHandler {
     trading_store: Arc<TradingStore>,
     replay_manager: Arc<ReplayManager>,
+    market_state: MarketState,
 }
 
 struct CancelOrderHandler {
     trading_store: Arc<TradingStore>,
     replay_manager: Arc<ReplayManager>,
+    market_state: MarketState,
 }
 
 struct GetOrdersHandler {
@@ -257,18 +266,22 @@ impl Handler for CreateOrderHandler {
             );
             return;
         }
-        let Some(sim_now_ms) = status.sim_now_ms else {
+        let Some(market_time_ms) = self
+            .market_state
+            .get(request.code.trim())
+            .map(|snapshot| snapshot.timestamp_ms)
+        else {
             render_api_error(
                 res,
                 TRADING_REPLAY_NOT_RUNNING_CODE,
-                "replay simulated time is not available",
+                "market time is not available",
             );
             return;
         };
 
         let trading_store = self.trading_store.clone();
         match task::spawn_blocking(move || {
-            trading_store.create_limit_order(request, sim_now_ms as i64)
+            trading_store.create_limit_order(request, market_time_ms)
         })
         .await
         {
@@ -417,17 +430,40 @@ impl Handler for CancelOrderHandler {
             );
             return;
         }
-        let Some(sim_now_ms) = status.sim_now_ms else {
+        let trading_store = self.trading_store.clone();
+        let user_id = request.user_id;
+        let order_id = request.order_id.clone();
+        let order =
+            match task::spawn_blocking(move || trading_store.get_order(user_id, &order_id)).await {
+                Ok(Ok(order)) => order,
+                Ok(Err(err)) => {
+                    render_trading_error(res, err);
+                    return;
+                }
+                Err(err) => {
+                    render_api_error(
+                        res,
+                        TRADING_INTERNAL_TASK_CODE,
+                        format!("order query task join failed: {err}"),
+                    );
+                    return;
+                }
+            };
+        let Some(market_time_ms) = self
+            .market_state
+            .get(&order.code)
+            .map(|snapshot| snapshot.timestamp_ms)
+        else {
             render_api_error(
                 res,
                 TRADING_REPLAY_NOT_RUNNING_CODE,
-                "replay simulated time is not available",
+                "market time is not available",
             );
             return;
         };
 
         let trading_store = self.trading_store.clone();
-        match task::spawn_blocking(move || trading_store.cancel_order(request, sim_now_ms as i64))
+        match task::spawn_blocking(move || trading_store.cancel_order(request, market_time_ms))
             .await
         {
             Ok(Ok(order)) => res.render(Json(ApiResponse::success(order))),
