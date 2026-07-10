@@ -60,6 +60,7 @@ pub enum ReplayCoordinatorError {
 pub struct ReplayTickResult {
     pub sim_now_ms: u64,
     pub safe_emit_time_ms: Option<i64>,
+    pub emitted_through_ms: Option<i64>,
     pub lag_ms: u64,
     pub events: Vec<ReplayEvent>,
     pub finished: bool,
@@ -221,13 +222,14 @@ impl ReplayCoordinator {
         let lag_ms = safe_emit_time_ms
             .map(|safe| sim_now_ms.saturating_sub(safe.max(0) as u64))
             .unwrap_or(0);
-        let emit_until = safe_emit_time_ms.map(|safe| safe.min(sim_now_ms as i64));
+        let emit_until = emitted_through_time(safe_emit_time_ms, sim_now_ms);
         let events = self.emit_events_until(emit_until);
         let finished = self.is_finished();
 
         Ok(ReplayTickResult {
             sim_now_ms,
             safe_emit_time_ms,
+            emitted_through_ms: emit_until,
             lag_ms,
             events,
             finished,
@@ -427,9 +429,13 @@ impl ReplayCoordinator {
     }
 }
 
+fn emitted_through_time(safe_emit_time_ms: Option<i64>, sim_now_ms: u64) -> Option<i64> {
+    safe_emit_time_ms.map(|safe| safe.min(sim_now_ms.min(i64::MAX as u64) as i64))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LaneKey, LaneRuntime, ReplayCoordinator};
+    use super::{LaneKey, LaneRuntime, ReplayCoordinator, emitted_through_time};
     use crate::common::{L2Order, Market, OrderDirection, OrderType};
     use crate::replay::event::ReplayEvent;
     use crate::replay::producer::{LaneOutput, LaneReceiver};
@@ -541,6 +547,13 @@ mod tests {
             .collect();
 
         assert_eq!(ordering, vec![(1_500, 10), (1_500, 20), (1_600, 21)]);
+    }
+
+    #[test]
+    fn emitted_through_time_never_exceeds_sim_clock() {
+        assert_eq!(emitted_through_time(Some(2_000), 1_500), Some(1_500));
+        assert_eq!(emitted_through_time(Some(1_000), 1_500), Some(1_000));
+        assert_eq!(emitted_through_time(None, 1_500), None);
     }
 
     #[tokio::test]

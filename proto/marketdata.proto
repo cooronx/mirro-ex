@@ -17,5 +17,16 @@ message OrderBookSnapshot {
 message Envelope {
   uint64 sequence = 1;
   int64 publish_ts_ms = 2;
-  OrderBookSnapshot snapshot = 3;
+  string replay_run_id = 3;
+  int64 event_ts_ms = 4;
+  uint64 replay_seq = 5;
+  oneof payload {
+    OrderBookSnapshot snapshot = 6;
+    bytes raw_event_json = 7;
+    Watermark watermark = 8;
+  }
+}
+
+message Watermark {
+  int64 completed_through_ms = 1;
 }

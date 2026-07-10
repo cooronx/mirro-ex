@@ -21,13 +21,11 @@ use tokio::sync::oneshot;
 
 use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
 use crate::matcher::order_book::OrderBook;
-use crate::replay::{ReplayEvent, ReplayHandlerPerfSnapshot};
+use crate::replay::{ReplayEvent, ReplayHandlerPerfSnapshot, SequencedReplayEvent};
 use crate::snapshot_exporter::SnapshotParquetExporter;
 use crate::trading::{SIDE_BUY, SIDE_SELL, TradingStore};
-use crate::webdata::MarketState;
 
-type WorkerReply = oneshot::Sender<Result<WorkerBatchPerf>>;
-const WEB_MARKET_UPDATE_BUCKET_MS: i64 = 3_000;
+type WorkerReply = oneshot::Sender<Result<WorkerThreadResult>>;
 
 enum WorkerCommand {
     StartDay {
@@ -35,7 +33,7 @@ enum WorkerCommand {
         reply: WorkerReply,
     },
     Events {
-        events: Vec<ReplayEvent>,
+        events: Vec<SequencedReplayEvent>,
         reply: WorkerReply,
     },
     EndDay {
@@ -49,12 +47,33 @@ struct WorkerHandle {
     thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MarketSnapshotUpdate {
+    pub sequence: u64,
+    pub code: String,
+    pub timestamp_ms: i64,
+    pub last_price: Option<i64>,
+    pub is_call_auction: bool,
+    pub snapshot: crate::matcher::order_book::OrderBookSnapshot,
+}
+
+#[derive(Debug, Default)]
+struct WorkerThreadResult {
+    perf: WorkerBatchPerf,
+    pub snapshots: Vec<MarketSnapshotUpdate>,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkerBatchOutput {
+    pub perf: ReplayHandlerPerfSnapshot,
+    pub snapshots: Vec<MarketSnapshotUpdate>,
+}
+
 struct CodeState {
     book: OrderBook,
     last_event_timestamp: Option<i64>,
     exporter: Option<SnapshotParquetExporter>,
     simulated_order_queues: HashMap<String, i64>,
-    pending_market_snapshot: Option<PendingMarketSnapshot>,
     last_order_activity_scan_epoch: Option<u64>,
 }
 
@@ -65,18 +84,9 @@ impl CodeState {
             last_event_timestamp: None,
             exporter: None,
             simulated_order_queues: HashMap::new(),
-            pending_market_snapshot: None,
             last_order_activity_scan_epoch: None,
         }
     }
-}
-
-struct PendingMarketSnapshot {
-    bucket: i64,
-    timestamp_ms: i64,
-    last_price: Option<i64>,
-    is_call_auction: bool,
-    snapshot: crate::matcher::order_book::OrderBookSnapshot,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -110,78 +120,90 @@ struct WorkerState {
     write_snapshot_parquet: bool,
     snapshot_parquet_dir: PathBuf,
     trading_store: Option<TradingStore>,
-    market_state: MarketState,
     current_day: Option<String>,
     codes: HashMap<String, CodeState>,
 }
 
 impl WorkerState {
     fn start_day(&mut self, day: String) -> Result<()> {
-        self.close_day()?;
+        let _ = self.close_day()?;
         self.current_day = Some(day);
         self.codes.clear();
         Ok(())
     }
 
-    fn process_events(&mut self, events: Vec<ReplayEvent>) -> Result<WorkerBatchPerf> {
+    fn process_events(&mut self, events: Vec<SequencedReplayEvent>) -> Result<WorkerThreadResult> {
         let start = Instant::now();
         let mut perf = WorkerBatchPerf {
             events: events.len(),
             ..WorkerBatchPerf::default()
         };
+        let mut snapshots = Vec::new();
         for event in events {
-            perf.add(self.process_event(event)?);
+            let (event_perf, snapshot) = self.process_event(event)?;
+            perf.add(event_perf);
+            if let Some(snapshot) = snapshot {
+                snapshots.push(snapshot);
+            }
         }
         perf.elapsed_ms = start.elapsed().as_millis();
-        Ok(perf)
+        Ok(WorkerThreadResult { perf, snapshots })
     }
 
-    fn process_event(&mut self, event: ReplayEvent) -> Result<WorkerBatchPerf> {
+    fn process_event(
+        &mut self,
+        sequenced_event: SequencedReplayEvent,
+    ) -> Result<(WorkerBatchPerf, Option<MarketSnapshotUpdate>)> {
         let mut perf = WorkerBatchPerf::default();
+        let sequence = sequenced_event.sequence;
+        let event = sequenced_event.event;
         let code = canonical_event_code(&event);
         let timestamp_ms = event.timestamp_ms();
         let transaction_for_matching = match &event {
             ReplayEvent::Transaction(transaction) => Some(transaction.clone()),
             ReplayEvent::Order(_) => None,
         };
-        let state = self
-            .codes
-            .entry(code.clone())
-            .or_insert_with(CodeState::new);
-        state.last_event_timestamp = Some(timestamp_ms);
+        let is_call_auction = is_call_auction_time(timestamp_ms);
+        let has_unsettled_holdings = {
+            let state = self
+                .codes
+                .entry(code.clone())
+                .or_insert_with(CodeState::new);
+            state.last_event_timestamp = Some(timestamp_ms);
 
-        match event {
-            ReplayEvent::Order(order) => {
-                if !should_track_order(&order) {
-                    return Ok(perf);
+            match event {
+                ReplayEvent::Order(order) => {
+                    if !should_track_order(&order) {
+                        return Ok((perf, None));
+                    }
+                    let order_context = format!(
+                        "failed to apply order for code={} channel={} message_number={}",
+                        order.code, order.channel, order.message_number
+                    );
+                    let start = Instant::now();
+                    state
+                        .book
+                        .apply_order(order)
+                        .with_context(|| order_context)?;
+                    perf.apply_elapsed_ms += start.elapsed().as_millis();
                 }
-                let order_context = format!(
-                    "failed to apply order for code={} channel={} message_number={}",
-                    order.code, order.channel, order.message_number
-                );
-                let start = Instant::now();
-                state
-                    .book
-                    .apply_order(order)
-                    .with_context(|| order_context)?;
-                perf.apply_elapsed_ms += start.elapsed().as_millis();
+                ReplayEvent::Transaction(transaction) => {
+                    let transaction_context = format!(
+                        "failed to apply transaction for code={} channel={} message_number={}",
+                        transaction.code, transaction.channel, transaction.message_number
+                    );
+                    let start = Instant::now();
+                    state
+                        .book
+                        .apply_transaction(transaction)
+                        .with_context(|| transaction_context)?;
+                    perf.apply_elapsed_ms += start.elapsed().as_millis();
+                }
             }
-            ReplayEvent::Transaction(transaction) => {
-                let transaction_context = format!(
-                    "failed to apply transaction for code={} channel={} message_number={}",
-                    transaction.code, transaction.channel, transaction.message_number
-                );
-                let start = Instant::now();
-                state
-                    .book
-                    .apply_transaction(transaction)
-                    .with_context(|| transaction_context)?;
-                perf.apply_elapsed_ms += start.elapsed().as_millis();
-            }
-        }
+            state.book.has_unsettled_holdings()
+        };
 
-        if !state.book.has_unsettled_holdings() {
-            let is_call_auction = is_call_auction_time(timestamp_ms);
+        let snapshot = if !has_unsettled_holdings {
             let start = Instant::now();
             let snapshot = self.current_snapshot(&code, timestamp_ms, is_call_auction)?;
             perf.snapshot_elapsed_ms += start.elapsed().as_millis();
@@ -189,7 +211,6 @@ impl WorkerState {
             self.record_snapshot(&code, timestamp_ms, &snapshot)?;
             perf.record_snapshot_elapsed_ms += start.elapsed().as_millis();
             let start = Instant::now();
-            self.queue_market_snapshot(&code, timestamp_ms, is_call_auction, snapshot.clone())?;
             perf.market_queue_elapsed_ms += start.elapsed().as_millis();
             let start = Instant::now();
             self.initialize_simulated_orders(&code, timestamp_ms)?;
@@ -199,8 +220,28 @@ impl WorkerState {
                 self.match_simulated_orders_from_transaction(&code, &transaction, timestamp_ms)?;
                 perf.trading_match_elapsed_ms += start.elapsed().as_millis();
             }
-        }
-        Ok(perf)
+            Some(snapshot)
+        } else {
+            None
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok((perf, None));
+        };
+        let last_price = self
+            .codes
+            .get(&code)
+            .and_then(|state| state.book.last_trade_price());
+        Ok((
+            perf,
+            Some(MarketSnapshotUpdate {
+                sequence,
+                code,
+                timestamp_ms,
+                last_price,
+                is_call_auction,
+                snapshot,
+            }),
+        ))
     }
 
     fn current_snapshot(
@@ -256,54 +297,6 @@ impl WorkerState {
                     )
                 })?;
         }
-        Ok(())
-    }
-
-    fn queue_market_snapshot(
-        &mut self,
-        code: &str,
-        timestamp_ms: i64,
-        is_call_auction: bool,
-        snapshot: crate::matcher::order_book::OrderBookSnapshot,
-    ) -> Result<()> {
-        let state = self
-            .codes
-            .get_mut(code)
-            .context("missing order book state for market snapshot")?;
-        let bucket = market_update_bucket(timestamp_ms);
-        if state
-            .pending_market_snapshot
-            .as_ref()
-            .is_some_and(|pending| pending.bucket != bucket)
-        {
-            Self::flush_pending_market_snapshot(&self.market_state, code, state)?;
-        };
-        let last_price = state.book.last_trade_price();
-        state.pending_market_snapshot = Some(PendingMarketSnapshot {
-            bucket,
-            timestamp_ms,
-            last_price,
-            is_call_auction,
-            snapshot,
-        });
-        Ok(())
-    }
-
-    fn flush_pending_market_snapshot(
-        market_state: &MarketState,
-        code: &str,
-        state: &mut CodeState,
-    ) -> Result<()> {
-        let Some(pending) = state.pending_market_snapshot.take() else {
-            return Ok(());
-        };
-        market_state.update(
-            code,
-            pending.timestamp_ms,
-            pending.last_price,
-            pending.is_call_auction,
-            &pending.snapshot,
-        );
         Ok(())
     }
 
@@ -406,7 +399,8 @@ impl WorkerState {
         Ok(())
     }
 
-    fn close_day(&mut self) -> Result<()> {
+    fn close_day(&mut self) -> Result<Vec<MarketSnapshotUpdate>> {
+        let mut snapshots = Vec::new();
         let codes = self.codes.keys().cloned().collect::<Vec<_>>();
         for code in codes {
             let (timestamp_ms, changed) = {
@@ -426,13 +420,20 @@ impl WorkerState {
                     let is_call_auction = is_call_auction_time(timestamp_ms);
                     let snapshot = self.current_snapshot(&code, timestamp_ms, is_call_auction)?;
                     self.record_snapshot(&code, timestamp_ms, &snapshot)?;
-                    self.queue_market_snapshot(&code, timestamp_ms, is_call_auction, snapshot)?;
                     self.initialize_simulated_orders(&code, timestamp_ms)?;
+                    let last_price = self
+                        .codes
+                        .get(&code)
+                        .and_then(|state| state.book.last_trade_price());
+                    snapshots.push(MarketSnapshotUpdate {
+                        sequence: 0,
+                        code: code.clone(),
+                        timestamp_ms,
+                        last_price,
+                        is_call_auction,
+                        snapshot,
+                    });
                 }
-            }
-
-            if let Some(state) = self.codes.get_mut(&code) {
-                Self::flush_pending_market_snapshot(&self.market_state, &code, state)?;
             }
 
             if let Some(exporter) = self
@@ -446,7 +447,7 @@ impl WorkerState {
             }
         }
         self.current_day = None;
-        Ok(())
+        Ok(snapshots)
     }
 }
 
@@ -463,7 +464,6 @@ impl OrderBookWorkerPool {
         write_snapshot_parquet: bool,
         snapshot_parquet_dir: impl Into<PathBuf>,
         trading_store: Option<TradingStore>,
-        market_state: MarketState,
     ) -> Result<Self> {
         if worker_count == 0 {
             bail!("orderbook_workers must be greater than zero");
@@ -479,7 +479,6 @@ impl OrderBookWorkerPool {
                 write_snapshot_parquet,
                 snapshot_parquet_dir: snapshot_parquet_dir.clone(),
                 trading_store: trading_store.clone(),
-                market_state: market_state.clone(),
                 current_day: None,
                 codes: HashMap::new(),
             };
@@ -489,15 +488,20 @@ impl OrderBookWorkerPool {
                     while let Ok(command) = receiver.recv() {
                         match command {
                             WorkerCommand::StartDay { day, reply } => {
-                                let _ = reply
-                                    .send(state.start_day(day).map(|_| WorkerBatchPerf::default()));
+                                let _ = reply.send(
+                                    state.start_day(day).map(|_| WorkerThreadResult::default()),
+                                );
                             }
                             WorkerCommand::Events { events, reply } => {
                                 let _ = reply.send(state.process_events(events));
                             }
                             WorkerCommand::EndDay { reply } => {
-                                let _ = reply
-                                    .send(state.close_day().map(|_| WorkerBatchPerf::default()));
+                                let _ = reply.send(state.close_day().map(|snapshots| {
+                                    WorkerThreadResult {
+                                        snapshots,
+                                        ..WorkerThreadResult::default()
+                                    }
+                                }));
                             }
                             WorkerCommand::Shutdown => {
                                 let _ = state.close_day();
@@ -530,13 +534,13 @@ impl OrderBookWorkerPool {
 
     pub async fn process_events(
         &self,
-        events: Vec<ReplayEvent>,
-    ) -> Result<ReplayHandlerPerfSnapshot> {
+        events: Vec<SequencedReplayEvent>,
+    ) -> Result<WorkerBatchOutput> {
         let mut batches = (0..self.workers.len())
             .map(|_| Vec::new())
             .collect::<Vec<_>>();
         for event in events {
-            let code = canonical_event_code(&event);
+            let code = canonical_event_code(&event.event);
             if !self.should_track_code(&code) {
                 continue;
             }
@@ -559,20 +563,38 @@ impl OrderBookWorkerPool {
                 .map_err(|_| anyhow!("orderbook worker {worker_id} command channel closed"))?;
             replies.push((worker_id, reply_rx));
         }
-        let worker_perfs = wait_for_replies(replies).await?;
-        Ok(aggregate_worker_perf(self.workers.len(), worker_perfs))
+        let worker_results = wait_for_replies(replies).await?;
+        let mut snapshots = Vec::new();
+        let mut perfs = Vec::with_capacity(worker_results.len());
+        for (worker_id, result) in worker_results {
+            perfs.push((worker_id, result.perf));
+            snapshots.extend(result.snapshots);
+        }
+        snapshots.sort_by_key(|snapshot| snapshot.sequence);
+        Ok(WorkerBatchOutput {
+            perf: aggregate_worker_perf(self.workers.len(), perfs),
+            snapshots,
+        })
     }
 
-    pub async fn end_day(&self) -> Result<()> {
-        self.broadcast(|reply| WorkerCommand::EndDay { reply })
-            .await
-            .map(|_| ())
+    pub async fn end_day(&self) -> Result<Vec<MarketSnapshotUpdate>> {
+        let results = self
+            .broadcast(|reply| WorkerCommand::EndDay { reply })
+            .await?;
+        let mut snapshots = results
+            .into_iter()
+            .flat_map(|(_, result)| result.snapshots)
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| {
+            (left.timestamp_ms, left.code.as_str()).cmp(&(right.timestamp_ms, right.code.as_str()))
+        });
+        Ok(snapshots)
     }
 
     async fn broadcast(
         &self,
         command: impl Fn(WorkerReply) -> WorkerCommand,
-    ) -> Result<Vec<(usize, WorkerBatchPerf)>> {
+    ) -> Result<Vec<(usize, WorkerThreadResult)>> {
         let mut replies = Vec::with_capacity(self.workers.len());
         for (worker_id, worker) in self.workers.iter().enumerate() {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -589,6 +611,10 @@ impl OrderBookWorkerPool {
         self.tracked_codes
             .as_ref()
             .is_none_or(|tracked_codes| tracked_codes.contains(code))
+    }
+
+    pub fn should_track_event(&self, event: &ReplayEvent) -> bool {
+        self.should_track_code(&canonical_event_code(event))
     }
 }
 
@@ -631,15 +657,15 @@ fn aggregate_worker_perf(
 }
 
 async fn wait_for_replies(
-    replies: Vec<(usize, oneshot::Receiver<Result<WorkerBatchPerf>>)>,
-) -> Result<Vec<(usize, WorkerBatchPerf)>> {
+    replies: Vec<(usize, oneshot::Receiver<Result<WorkerThreadResult>>)>,
+) -> Result<Vec<(usize, WorkerThreadResult)>> {
     let mut worker_perfs = Vec::with_capacity(replies.len());
     for (worker_id, reply) in replies {
-        let perf = reply
+        let result = reply
             .await
             .map_err(|_| anyhow!("orderbook worker {worker_id} stopped without replying"))?
             .with_context(|| format!("orderbook worker {worker_id} failed"))?;
-        worker_perfs.push((worker_id, perf));
+        worker_perfs.push((worker_id, result));
     }
     Ok(worker_perfs)
 }
@@ -733,13 +759,14 @@ fn is_call_auction_time(timestamp_ms: i64) -> bool {
         || (CLOSING_START_MS..CLOSING_END_MS).contains(&local_ms)
 }
 
-fn market_update_bucket(timestamp_ms: i64) -> i64 {
-    timestamp_ms.div_euclid(WEB_MARKET_UPDATE_BUCKET_MS)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{is_call_auction_time, stable_worker_index};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use super::{WorkerState, is_call_auction_time, stable_worker_index};
+    use crate::common::{L2Order, L2Transaction, Market, OrderDirection, OrderType};
+    use crate::replay::{ReplayEvent, SequencedReplayEvent};
 
     #[test]
     fn stable_hash_routes_same_code_to_same_worker() {
@@ -758,5 +785,56 @@ mod tests {
         assert!(is_call_auction_time(1_778_741_820_000));
         assert!(is_call_auction_time(1_778_741_999_999));
         assert!(!is_call_auction_time(1_778_742_000_000));
+    }
+
+    #[test]
+    fn close_day_returns_snapshot_created_by_holding_finalization() {
+        let mut state = WorkerState {
+            worker_id: 0,
+            snapshot_depth: 10,
+            write_snapshot_parquet: false,
+            snapshot_parquet_dir: PathBuf::new(),
+            trading_store: None,
+            current_day: Some("2026-05-12".to_string()),
+            codes: HashMap::new(),
+        };
+        let order = L2Order {
+            market: Market::XSHE,
+            channel: 1,
+            message_number: 2,
+            code: "000001".to_string(),
+            price: 0,
+            volume: 7,
+            direction: OrderDirection::Buy,
+            order_type: OrderType::Market,
+            timestamp_ms: 1_000,
+            order_number: 0,
+        };
+        let transaction = L2Transaction {
+            market: Market::XSHE,
+            channel: 1,
+            message_number: 3,
+            code: "000001".to_string(),
+            timestamp_ms: 1_100,
+            price: 101_000,
+            volume: 4,
+            buy_number: 2,
+            sell_number: 0,
+            deal_type: "F".to_string(),
+        };
+
+        let result = state
+            .process_events(vec![
+                SequencedReplayEvent::new(1, ReplayEvent::Order(order)),
+                SequencedReplayEvent::new(2, ReplayEvent::Transaction(transaction)),
+            ])
+            .unwrap();
+        assert!(result.snapshots.is_empty());
+
+        let snapshots = state.close_day().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].timestamp_ms, 1_100);
+        assert_eq!(snapshots[0].snapshot.bids[0].price, 101_000);
+        assert_eq!(snapshots[0].snapshot.bids[0].total_qty, 3);
     }
 }

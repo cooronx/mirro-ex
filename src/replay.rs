@@ -10,4 +10,4 @@ pub use controller::{
     ReplayCommand, ReplayControl, ReplayController, ReplayHandler, ReplayHandlerPerfSnapshot,
     ReplayRunReport, ReplayRuntimeState, ReplayStatusReporter, ReplayStatusSnapshot,
 };
-pub use event::ReplayEvent;
+pub use event::{ReplayEvent, SequencedReplayEvent};

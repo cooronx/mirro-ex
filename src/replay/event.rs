@@ -16,11 +16,28 @@
 use super::reader_cursor::ReplayDataKind;
 use crate::common::Market;
 use crate::common::{L2Order, L2Transaction};
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ReplayEvent {
     Order(L2Order),
     Transaction(L2Transaction),
+}
+
+#[derive(Debug, Clone)]
+pub struct SequencedReplayEvent {
+    pub sequence: u64,
+    pub event: ReplayEvent,
+}
+
+impl SequencedReplayEvent {
+    pub fn new(sequence: u64, event: ReplayEvent) -> Self {
+        Self { sequence, event }
+    }
+
+    pub fn timestamp_ms(&self) -> i64 {
+        self.event.timestamp_ms()
+    }
 }
 
 impl ReplayEvent {

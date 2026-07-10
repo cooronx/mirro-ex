@@ -337,6 +337,10 @@ pub trait ReplayHandler: Send {
 
     async fn on_events(&mut self, events: Vec<ReplayEvent>) -> anyhow::Result<()>;
 
+    async fn on_watermark(&mut self, _safe_emit_time_ms: i64) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn last_perf_snapshot(&self) -> Option<ReplayHandlerPerfSnapshot> {
         None
     }
@@ -687,6 +691,14 @@ impl ReplayController {
                     .map_err(ReplayControllerError::Handler)?;
                 handler_elapsed_ms = handler_start.elapsed().as_millis();
             }
+            if !result.finished
+                && let Some(emitted_through_ms) = result.emitted_through_ms
+            {
+                handler
+                    .on_watermark(emitted_through_ms)
+                    .await
+                    .map_err(ReplayControllerError::Handler)?;
+            }
             let handler_detail = handler.last_perf_snapshot();
             max_handler_elapsed_ms = max_handler_elapsed_ms.max(handler_elapsed_ms);
             let tick_elapsed_ms = tick_process_start.elapsed().as_millis();
@@ -731,6 +743,12 @@ impl ReplayController {
             .on_day_end(&daily_window.day)
             .await
             .map_err(ReplayControllerError::Handler)?;
+        if !stopped {
+            handler
+                .on_watermark(i64::MAX)
+                .await
+                .map_err(ReplayControllerError::Handler)?;
+        }
 
         Ok(SingleDayReplayOutcome::Report {
             total_lag_ms,
