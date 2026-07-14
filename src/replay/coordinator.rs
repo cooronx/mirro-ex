@@ -1,20 +1,6 @@
-//!
-//! replay全局调度与归并模块。
-//! 1. 输入：
-//!    - `SimClock` 当前的模拟时间
-//!    - 各 lane 通过 channel 送来的 `LaneOutput`
-//!    - `ReplayDbReader` 与 lane producer 组成的后台供给链路
-//!
-//! 2. 输出：
-//!    - `ReplayTickResult`
-//!    - 包含当前 tick 能安全发出的 `ReplayEvent` 列表，以及 lag / finished 等状态
-//!
-//! 3. 逻辑：
-//!    - 启动并管理所有 lane producer
-//!    - 维护每个 lane 当前 ready 的事件队列和 watermark
-//!    - 根据 `SimClock` 当前时间计算本轮允许发出的安全时间上界
-//!    - 从所有 lane 的队首事件中做全局归并，确保跨 channel 的事件按正确顺序输出
-//!
+//! 负责所有 replay lane 的全局调度和归并。
+//! coordinator 维护各 lane 的待处理事件与 watermark，并结合模拟时钟计算当前可释放范围。
+//! 每个 tick 从各 lane 队首做全局有序归并，返回 `ReplayTickResult`。
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 

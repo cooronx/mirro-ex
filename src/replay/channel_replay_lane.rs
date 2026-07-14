@@ -1,19 +1,6 @@
-//!
-//! 单个 channel 内部合流模块。
-//! 1. 输入：
-//!    - 某个交易日、某个 channel 的一批 `FetchedBatch`
-//!    - batch 内已经按 `message_number` 排好的委托或成交数据
-//!
-//! 2. 输出：
-//!    - 该 channel 内部按正确顺序合并后的 `ReplayEvent`
-//!    - 以及当前各类数据已经覆盖到哪个 message number 的推进状态
-//!
-//! 3. 逻辑：
-//!    - 维护同一个 channel 的 order buffer 和 transaction buffer
-//!    - 校验 batch 的 day/channel/kind/range 是否与 lane 一致
-//!    - 在单个 channel 内把委托和成交按 `message_number` 合并成统一事件流
-//!    - 记录该 lane 当前已经覆盖到的委托/成交上界，供上层判断是否可继续拉批
-//!
+//! 负责单个 channel 内的委托和成交合流。
+//! 两类数据分别缓冲，并按照 `message_number` 合并成统一的 `ReplayEvent` 序列。
+//! 只有委托和成交的读取范围都覆盖到安全边界后，事件才会向上游释放。
 use std::collections::VecDeque;
 
 use thiserror::Error;

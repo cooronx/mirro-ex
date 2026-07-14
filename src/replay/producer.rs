@@ -1,20 +1,6 @@
-//!
-//! lane生产者模块。
-//! 1. 输入：
-//!    - `ReplayDbReader` 提供的批量读取能力
-//!    - 一组 `ReaderCursor`
-//!    - 每个 lane 对应的 `ChannelReplayLane`
-//!
-//! 2. 输出：
-//!    - 按 lane 切分的 `LaneOutput`
-//!    - 每个 lane 通过独立的 mpsc channel 把 ready batch / watermark / finished 状态发给 coordinator
-//!
-//! 3. 逻辑：
-//!    - 根据 cursor 集合构建 lane，并把 source 归并到正确的 lane key
-//!    - 后台不断从 `ReplayDbReader` 拉取下一批数据
-//!    - 把批次喂给对应 `ChannelReplayLane`，让 lane 产出当前 ready 的事件
-//!    - 把每个 lane 的 ready 事件、水位和完成状态异步发送给 `ReplayCoordinator`
-//!
+//! 为每个 market/channel lane 持续生产可回放事件。
+//! producer 从 `ReplayDbReader` 拉取批次，交给 `ChannelReplayLane` 完成 channel 内合流。
+//! ready batch、watermark 和完成状态通过独立 channel 发送给 `ReplayCoordinator`。
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
