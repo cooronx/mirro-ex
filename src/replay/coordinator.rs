@@ -304,14 +304,6 @@ impl ReplayCoordinator {
                 lane_runtime.watermark_ms = watermark_ms;
                 lane_runtime.warmed_up = true;
             }
-            LaneOutput::Progress {
-                lane_key,
-                watermark_ms,
-            } => {
-                Self::validate_lane_key(expected_lane_key, lane_key)?;
-                lane_runtime.watermark_ms = watermark_ms;
-                lane_runtime.warmed_up = true;
-            }
             LaneOutput::Finished { lane_key } => {
                 Self::validate_lane_key(expected_lane_key, lane_key)?;
                 lane_runtime.finished = true;
@@ -540,37 +532,6 @@ mod tests {
         assert_eq!(emitted_through_time(Some(2_000), 1_500), Some(1_500));
         assert_eq!(emitted_through_time(Some(1_000), 1_500), Some(1_000));
         assert_eq!(emitted_through_time(None, 1_500), None);
-    }
-
-    #[tokio::test]
-    async fn bootstrap_accepts_progress_as_first_output() {
-        let (sender, receiver) = mpsc::channel(4);
-        let lane = LaneKey::new(Market::XSHG, 1);
-
-        sender
-            .send(LaneOutput::Progress {
-                lane_key: lane,
-                watermark_ms: Some(1_900),
-            })
-            .await
-            .unwrap();
-
-        let clock = SimClock::new(1_000, 2_000, 1.0, false).unwrap();
-        let mut coordinator = ReplayCoordinator::new(
-            vec![LaneReceiver {
-                lane_key: lane,
-                receiver,
-            }],
-            clock,
-            100,
-        )
-        .unwrap();
-
-        coordinator.bootstrap().await.unwrap();
-
-        let lane_runtime = coordinator.lanes.get(&lane).unwrap();
-        assert!(lane_runtime.warmed_up);
-        assert_eq!(lane_runtime.watermark_ms, Some(1_900));
     }
 
     #[tokio::test]

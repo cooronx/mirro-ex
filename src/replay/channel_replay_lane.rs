@@ -170,21 +170,6 @@ impl ChannelReplayLane {
         self.transaction_buffer.len()
     }
 
-    pub fn next_buffered_event_timestamp_ms(&self) -> Option<i64> {
-        match (self.order_buffer.front(), self.transaction_buffer.front()) {
-            (Some(order), Some(transaction)) => {
-                if order.message_number < transaction.message_number {
-                    Some(order.timestamp_ms)
-                } else {
-                    Some(transaction.timestamp_ms)
-                }
-            }
-            (Some(order), None) => Some(order.timestamp_ms),
-            (None, Some(transaction)) => Some(transaction.timestamp_ms),
-            (None, None) => None,
-        }
-    }
-
     pub fn push_batch(&mut self, batch: FetchedBatch) -> Result<()> {
         self.validate_batch_identity(&batch)?;
 
