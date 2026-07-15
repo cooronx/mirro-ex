@@ -23,46 +23,25 @@ Mirro-Ex 是一个面向沪深市场的 L2 行情回放与模拟交易系统。
 - 将订单簿快照按交易日和证券代码导出为 Parquet。
 - 提供 Web UI，用于回放控制、行情展示、账户、下单、撤单、订单和持仓查看。
 - 使用 SQLite 维护模拟账户、订单、成交、持仓、资金冻结和持仓冻结。
-- 预留 NATS 实时发布订单簿快照路径，目前主要是连接与编码骨架。
+- 可以使用python来执行程序化交易，方便用于进行拆单的测试
+
+## 路线图
+
+- [√] ClickHouse L2 行情读取。
+- [√] 可控倍速的行情回放。
+- [√] 多 worker 订单簿重建。
+- [√] Parquet 盘口快照导出。
+- [√] Web UI 回放控制和行情展示。
+- [√] 模拟账户、限价单、撤单、成交、资金和持仓结算。
+- [√] 将 NATS 实时发布接入主回放快照路径。
+- [√] 增加成交明细查询 API 和前端成交列表。
+- [ ] 完善回放结果校验、性能测试和 benchmark。
+- [ ] 补充更完整的部署文档和数据导入示例。
 
 ## 项目文档
 
 - [撮合流程说明](docs/matching_flow.md)
 - [核心数据结构说明](docs/struct.md)
-
-## 系统架构
-
-```text
-ClickHouse L2 data
-        |
-        v
-replay reader / coordinator / simulated clock
-        |
-        v
-orderbook workers
-        |
-        +----> Parquet order book snapshots
-        |
-        +----> webdata::MarketState
-        |          |
-        |          +----> HTTP APIs / SSE
-        |                    |
-        |                    +----> Vue Web UI
-        |
-        +----> simulated limit order matching
-                   |
-                   +----> SQLite trading state
-```
-
-主要模块：
-
-- `src/replay/`：行情读取、事件排序、模拟时钟和回放协调。
-- `src/orderbook_worker.rs`：多 worker 订单簿重建、快照记录和模拟订单撮合入口。
-- `src/matcher/`：订单簿与交易所撮合相关机制。
-- `src/trading/`：模拟账户、订单、成交、持仓和结算逻辑。
-- `src/web/`：Salvo HTTP 路由和 API handler。
-- `src/webdata/`：服务 Web UI 的行情状态和 SSE 事件模型。
-- `webui/`：Vue 3 前端。
 
 ## 快速开始
 
@@ -74,9 +53,6 @@ orderbook workers
 - NATS Server，可选；当前不是主数据路径。
 - Python 3.9 或更高版本。
 - Hugging Face CLI，用于下载项目样例数据。
-
-- Rust 侧 SQLite 使用 `rusqlite` 的 `bundled` feature，不需要系统安装sqlite也能跑。
-- Protobuf 编译使用 `protoc-bin-vendored`，也不需要手动安装 `protoc`。
 
 ### 安装
 
@@ -99,6 +75,11 @@ cd ..
 
 ```bash
 python -m pip install -U "huggingface_hub[cli]"
+```
+
+安装clickhouse
+```bash
+curl https://clickhouse.com/ | sh
 ```
 
 准备本地配置：
@@ -164,7 +145,9 @@ python scripts/create_local_clickhouse_tables.sql
 python scripts/create_trading_sqlite_schema.sql
 ```
 
-后端启动时会根据配置初始化本地 SQLite 交易库。但是 ClickHouse 需要提前建表并导入 L2 样例数据。
+创建完clickhouse表之后，就可以把我们刚刚下载的数据导入进去了
+
+后端启动时会根据配置初始化本地 SQLite 交易库。
 
 ## 运行
 
@@ -302,19 +285,6 @@ match_rate=...
 
 如果指定了 `--mismatch-output`，不一致的行会写入 CSV，便于继续排查具体的档位价格和数量差异。
 
-## 路线图
-
-- [√] ClickHouse L2 行情读取。
-- [√] 可控倍速的行情回放。
-- [√] 多 worker 订单簿重建。
-- [√] Parquet 盘口快照导出。
-- [√] Web UI 回放控制和行情展示。
-- [√] 模拟账户、限价单、撤单、成交、资金和持仓结算。
-- [ ] 将 NATS 实时发布接入主回放快照路径。
-- [ ] 增加成交明细查询 API 和前端成交列表。
-- [ ] 完善回放结果校验、性能测试和 benchmark。
-- [ ] 补充更完整的部署文档和数据导入示例。
-
 ## 常见问题
 
 ### 验证的脚本为什么要有一个时间差去对比？
@@ -322,15 +292,6 @@ match_rate=...
 如果你看了compare_l1_to_snapshot.py，会注意到有一个参数：`--window-ms`，用于在这个时间窗口范围内来进行对比。
 
 为什么不按照时间戳直接来对比呢，这是因为数据商（或者说交易所）给的L1数据不是**精准**的时间点，例如 `09:32:00` 的L1数据，并不一定就是完全精准的时间点，有可能是 `09:32:00.666`, `09:32:01.012` ，所以我在对比生成的盘口和L1数据的时候，用了个2s的间隔，也就是生成的盘口如果在2s内能找到相同的L1数据，那么我就认为这个盘口生成的没有问题
-
-
-### Web UI 没有行情变化
-
-确认后端正在运行、回放已经启动，并且请求中的交易日、时间段和证券代码在 ClickHouse 中有数据。`replayStatus.sim_now_ms` 是模拟时钟时间，盘口中的 `timestamp_ms` 是已处理市场数据时间，两者含义不同。
-
-### 前端请求失败
-
-开发模式下确认后端运行在 `http://127.0.0.1:5800`，前端运行在 `http://127.0.0.1:5173`。如果修改了后端端口，需要同步调整 `webui/vite.config.ts` 中的代理配置。
 
 ## 贡献
 
@@ -342,13 +303,6 @@ cargo check
 cargo test
 cd webui && npm run build
 ```
-
-## 版本历史
-
-- `0.1.0`
-  - 初始开发版本。
-  - 支持 L2 行情回放、订单簿重建、Parquet 快照导出、Web UI 和基础模拟交易。
-
 ## 作者
 
 - cooronx
