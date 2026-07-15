@@ -223,6 +223,29 @@ python scripts/replay_controller.py resume
 python scripts/replay_controller.py stop
 ```
 
+## Python 程序化交易示例
+
+`scripts/nats_subscribe_snapshots.py` 订阅 NATS 盘口快照，并通过后端 HTTP API
+执行一个最小的单标的策略：没有持仓时按卖一买入，有可用持仓时按买一卖出。
+脚本会先登录模拟账户；账户不存在时会自动创建。有在途订单时等待，超过 60 秒未成交则
+撤单，并在下一次行情到来时重试。
+
+安装 Python 依赖：
+
+```bash
+python -m pip install nats-py protobuf
+```
+
+启动 NATS、Mirro-Ex 后端和对应标的的行情回放后运行：
+
+```bash
+python scripts/nats_subscribe_snapshots.py \
+  300274.XSHE
+```
+
+建议先加上 `--dry-run --print-snapshots` 验证行情和信号，不实际提交模拟订单。
+账户、下单数量和撤单时间等示例配置集中在脚本顶部，可直接修改。
+
 ## 快速验证
 
 项目提供脚本用于把官方 L1 盘口 Parquet 和本系统回放导出的订单簿 snapshot Parquet 进行逐行对比。

@@ -1,138 +1,146 @@
 #!/usr/bin/env python3
+"""订阅 NATS 盘口并演示最简单的自动买入、卖出和撤单。"""
 
 import argparse
 import asyncio
-from typing import Iterable
+import json
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from marketdata_pb2 import Envelope
 
-from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
-from nats.aio.client import Client as NATS
+NATS_URL = "nats://127.0.0.1:4222"
+NATS_SUBJECT = "market.snapshot"
+API_URL = "http://127.0.0.1:5800"
+USERNAME = "python_strategy"
+PASSWORD = "python_strategy"
+INITIAL_CASH = 1_000_000 * 10_000
+ORDER_QTY = 100
+DECISION_INTERVAL_MS = 3_000
+STALE_ORDER_MS = 60_000
+ACTIVE_STATUSES = {"new", "working", "partially_filled"}
 
+class ApiError(RuntimeError):
+    def __init__(self, code, message):
+        super().__init__(f"API error {code}: {message}")
+        self.code = code
 
-def build_proto_types():
-    file_proto = descriptor_pb2.FileDescriptorProto()
-    file_proto.name = "marketdata.proto"
-    file_proto.package = "mirro.marketdata"
-    file_proto.syntax = "proto3"
+async def api(path, payload=None, query=None):
+    def request():
+        url = API_URL + path
+        if query:
+            url += "?" + urlencode(query)
+        body = None if payload is None else json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"} if body else {}
+        req = Request(url, data=body, headers=headers, method="POST" if body else "GET")
+        try:
+            with urlopen(req, timeout=5) as response:
+                result = json.load(response)
+        except URLError as exc:
+            raise RuntimeError(f"cannot reach {API_URL}: {exc}") from exc
+        if result.get("code") != 1 or result.get("data") is None:
+            raise ApiError(result.get("code"), result.get("msg"))
+        return result["data"]
+    return await asyncio.to_thread(request)
 
-    price_level = file_proto.message_type.add()
-    price_level.name = "PriceLevel"
+async def login_or_create_account():
+    credentials = {"username": USERNAME, "password": PASSWORD}
+    try:
+        return await api("/trading/login", credentials)
+    except ApiError as exc:
+        if exc.code != 2407:
+            raise
+    try:
+        return await api("/trading/accounts", {**credentials, "initial_cash": INITIAL_CASH})
+    except ApiError as exc:
+        if exc.code != 2409:
+            raise
+        return await api("/trading/login", credentials)
 
-    field = price_level.field.add()
-    field.name = "price"
-    field.number = 1
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_INT64
+class SimpleStrategy:
+    def __init__(self, user_id, code, dry_run):
+        self.user_id = user_id
+        self.code = code
+        self.dry_run = dry_run
+        self.last_decision_ms = 0
 
-    field = price_level.field.add()
-    field.name = "quantity"
-    field.number = 2
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_INT64
+    async def on_snapshot(self, snapshot):
+        if snapshot.code != self.code or not snapshot.bids or not snapshot.asks:
+            return
+        now = snapshot.event_ts_ms
+        if now < self.last_decision_ms:
+            self.last_decision_ms = 0
+        if now - self.last_decision_ms < DECISION_INTERVAL_MS:
+            return
+        self.last_decision_ms = now
+        try:
+            orders, positions = await asyncio.gather(
+                api("/trading/orders", query={"user_id": self.user_id}),
+                api("/trading/positions", query={"user_id": self.user_id, "code": self.code}),
+            )
+            active = next(
+                (o for o in orders if o["code"] == self.code and o["status"] in ACTIVE_STATUSES),
+                None,
+            )
+            if active:
+                if now - active["created_at"] >= STALE_ORDER_MS:
+                    await self.cancel(active["order_id"])
+                return
 
-    snapshot = file_proto.message_type.add()
-    snapshot.name = "OrderBookSnapshot"
+            position = positions[0] if positions else None
+            available = position["available_qty"] if position else 0
+            if available > 0:
+                await self.order("sell", snapshot.bids[0].price, min(ORDER_QTY, available))
+            else:
+                await self.order("buy", snapshot.asks[0].price, ORDER_QTY)
+        except (ApiError, RuntimeError) as exc:
+            print(f"decision skipped: {exc}")
 
-    field = snapshot.field.add()
-    field.name = "event_ts_ms"
-    field.number = 1
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_INT64
+    async def order(self, side, price, qty):
+        print(f"{side} {self.code} price={price / 10000:.4f} qty={qty}")
+        if not self.dry_run:
+            await api(
+                "/trading/orders",
+                {"user_id": self.user_id, "code": self.code, "side": side, "price": price, "qty": qty},
+            )
 
-    field = snapshot.field.add()
-    field.name = "code"
-    field.number = 2
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
-
-    field = snapshot.field.add()
-    field.name = "bids"
-    field.number = 3
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
-    field.type_name = ".mirro.marketdata.PriceLevel"
-
-    field = snapshot.field.add()
-    field.name = "asks"
-    field.number = 4
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
-    field.type_name = ".mirro.marketdata.PriceLevel"
-
-    envelope = file_proto.message_type.add()
-    envelope.name = "Envelope"
-
-    field = envelope.field.add()
-    field.name = "sequence"
-    field.number = 1
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT64
-
-    field = envelope.field.add()
-    field.name = "publish_ts_ms"
-    field.number = 2
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_INT64
-
-    field = envelope.field.add()
-    field.name = "snapshot"
-    field.number = 3
-    field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-    field.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
-    field.type_name = ".mirro.marketdata.OrderBookSnapshot"
-
-    pool = descriptor_pool.DescriptorPool()
-    pool.Add(file_proto)
-    envelope_descriptor = pool.FindMessageTypeByName("mirro.marketdata.Envelope")
-    envelope_type = message_factory.GetMessageClass(envelope_descriptor)
-    return envelope_type
-
-
-Envelope = build_proto_types()
-
-
-def format_levels(levels: Iterable) -> str:
-    return " ".join(f"{level.price / 10000:.4f}:{level.quantity}" for level in levels) or "-"
-
+    async def cancel(self, order_id):
+        print(f"cancel {order_id}")
+        if not self.dry_run:
+            await api(
+                "/trading/orders/cancel",
+                {"user_id": self.user_id, "order_id": order_id},
+            )
 
 async def main():
-    parser = argparse.ArgumentParser(
-        description="Subscribe to Mirro snapshot messages from NATS and print them."
-    )
-    parser.add_argument(
-        "--url",
-        default="nats://127.0.0.1:4222",
-        help="NATS server URL, default: %(default)s",
-    )
-    parser.add_argument(
-        "--subject",
-        default="market.snapshot",
-        help="NATS subject to subscribe, default: %(default)s",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("code", help="证券代码，例如 300274.XSHE")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--print-snapshots", action="store_true")
     args = parser.parse_args()
-
-    nc = NATS()
-    await nc.connect(args.url)
-
-    async def handle_message(msg):
-        envelope = Envelope()
-        envelope.ParseFromString(msg.data)
-        snapshot = envelope.snapshot
-        print(
-            f"subject={msg.subject} sequence={envelope.sequence} "
-            f"publish_ts_ms={envelope.publish_ts_ms} event_ts_ms={snapshot.event_ts_ms} "
-            f"code={snapshot.code} bids=[{format_levels(snapshot.bids)}] "
-            f"asks=[{format_levels(snapshot.asks)}]"
-        )
-
-    await nc.subscribe(args.subject, cb=handle_message)
-    print(f"Subscribed to {args.subject} on {args.url}")
-
     try:
-        while True:
-            await asyncio.sleep(3600)
-    finally:
-        await nc.drain()
-
+        from nats.aio.client import Client as NATS
+    except ModuleNotFoundError as exc:
+        raise SystemExit("run: python -m pip install nats-py protobuf") from exc
+    account = await login_or_create_account()
+    strategy = SimpleStrategy(account["user_id"], args.code.strip(), args.dry_run)
+    nc = NATS()
+    await nc.connect(NATS_URL)
+    async def handle(message):
+        envelope = Envelope()
+        envelope.ParseFromString(message.data)
+        if envelope.WhichOneof("payload") != "snapshot":
+            return
+        snapshot = envelope.snapshot
+        if args.print_snapshots and snapshot.code == strategy.code:
+            print(f"snapshot {snapshot.event_ts_ms} {snapshot.code}")
+        await strategy.on_snapshot(snapshot)
+    await nc.subscribe(NATS_SUBJECT, cb=handle)
+    print(f"subscribed {NATS_SUBJECT}, account={account['user_id']}, code={strategy.code}")
+    await asyncio.Future()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
