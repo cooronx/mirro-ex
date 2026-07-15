@@ -1,20 +1,6 @@
-//!
-//! replay全局调度与归并模块。
-//! 1. 输入：
-//!    - `SimClock` 当前的模拟时间
-//!    - 各 lane 通过 channel 送来的 `LaneOutput`
-//!    - `ReplayDbReader` 与 lane producer 组成的后台供给链路
-//!
-//! 2. 输出：
-//!    - `ReplayTickResult`
-//!    - 包含当前 tick 能安全发出的 `ReplayEvent` 列表，以及 lag / finished 等状态
-//!
-//! 3. 逻辑：
-//!    - 启动并管理所有 lane producer
-//!    - 维护每个 lane 当前 ready 的事件队列和 watermark
-//!    - 根据 `SimClock` 当前时间计算本轮允许发出的安全时间上界
-//!    - 从所有 lane 的队首事件中做全局归并，确保跨 channel 的事件按正确顺序输出
-//!
+//! 负责所有 replay lane 的全局调度和归并。
+//! coordinator 维护各 lane 的待处理事件与 watermark，并结合模拟时钟计算当前可释放范围。
+//! 每个 tick 从各 lane 队首做全局有序归并，返回 `ReplayTickResult`。
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
@@ -60,6 +46,7 @@ pub enum ReplayCoordinatorError {
 pub struct ReplayTickResult {
     pub sim_now_ms: u64,
     pub safe_emit_time_ms: Option<i64>,
+    pub emitted_through_ms: Option<i64>,
     pub lag_ms: u64,
     pub events: Vec<ReplayEvent>,
     pub finished: bool,
@@ -221,13 +208,14 @@ impl ReplayCoordinator {
         let lag_ms = safe_emit_time_ms
             .map(|safe| sim_now_ms.saturating_sub(safe.max(0) as u64))
             .unwrap_or(0);
-        let emit_until = safe_emit_time_ms.map(|safe| safe.min(sim_now_ms as i64));
+        let emit_until = emitted_through_time(safe_emit_time_ms, sim_now_ms);
         let events = self.emit_events_until(emit_until);
         let finished = self.is_finished();
 
         Ok(ReplayTickResult {
             sim_now_ms,
             safe_emit_time_ms,
+            emitted_through_ms: emit_until,
             lag_ms,
             events,
             finished,
@@ -313,14 +301,6 @@ impl ReplayCoordinator {
                 Self::validate_lane_key(expected_lane_key, lane_key)?;
                 lane_runtime.ready_events.extend(events);
                 Self::sort_ready_events_by_market_time(lane_runtime);
-                lane_runtime.watermark_ms = watermark_ms;
-                lane_runtime.warmed_up = true;
-            }
-            LaneOutput::Progress {
-                lane_key,
-                watermark_ms,
-            } => {
-                Self::validate_lane_key(expected_lane_key, lane_key)?;
                 lane_runtime.watermark_ms = watermark_ms;
                 lane_runtime.warmed_up = true;
             }
@@ -427,9 +407,13 @@ impl ReplayCoordinator {
     }
 }
 
+fn emitted_through_time(safe_emit_time_ms: Option<i64>, sim_now_ms: u64) -> Option<i64> {
+    safe_emit_time_ms.map(|safe| safe.min(sim_now_ms.min(i64::MAX as u64) as i64))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LaneKey, LaneRuntime, ReplayCoordinator};
+    use super::{LaneKey, LaneRuntime, ReplayCoordinator, emitted_through_time};
     use crate::common::{L2Order, Market, OrderDirection, OrderType};
     use crate::replay::event::ReplayEvent;
     use crate::replay::producer::{LaneOutput, LaneReceiver};
@@ -543,35 +527,11 @@ mod tests {
         assert_eq!(ordering, vec![(1_500, 10), (1_500, 20), (1_600, 21)]);
     }
 
-    #[tokio::test]
-    async fn bootstrap_accepts_progress_as_first_output() {
-        let (sender, receiver) = mpsc::channel(4);
-        let lane = LaneKey::new(Market::XSHG, 1);
-
-        sender
-            .send(LaneOutput::Progress {
-                lane_key: lane,
-                watermark_ms: Some(1_900),
-            })
-            .await
-            .unwrap();
-
-        let clock = SimClock::new(1_000, 2_000, 1.0, false).unwrap();
-        let mut coordinator = ReplayCoordinator::new(
-            vec![LaneReceiver {
-                lane_key: lane,
-                receiver,
-            }],
-            clock,
-            100,
-        )
-        .unwrap();
-
-        coordinator.bootstrap().await.unwrap();
-
-        let lane_runtime = coordinator.lanes.get(&lane).unwrap();
-        assert!(lane_runtime.warmed_up);
-        assert_eq!(lane_runtime.watermark_ms, Some(1_900));
+    #[test]
+    fn emitted_through_time_never_exceeds_sim_clock() {
+        assert_eq!(emitted_through_time(Some(2_000), 1_500), Some(1_500));
+        assert_eq!(emitted_through_time(Some(1_000), 1_500), Some(1_000));
+        assert_eq!(emitted_through_time(None, 1_500), None);
     }
 
     #[tokio::test]

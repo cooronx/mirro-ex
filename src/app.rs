@@ -1,15 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono::Utc;
 use tracing::info;
 
 use crate::config::AppConfig;
-use crate::orderbook_worker::OrderBookWorkerPool;
+use crate::orderbook_worker::{MarketSnapshotUpdate, OrderBookWorkerPool};
 use crate::publisher::NatsDispatcher;
 use crate::replay::{
     ReplayControl, ReplayController, ReplayEvent, ReplayHandler, ReplayHandlerPerfSnapshot,
-    ReplayRunReport, ReplayStatusReporter,
+    ReplayRunReport, ReplayStatusReporter, SequencedReplayEvent,
 };
 use crate::replay_manager::ReplayTaskConfig;
 use crate::trading::{TradingStore, trading_db_path_from_config};
@@ -19,7 +20,11 @@ use tokio::sync::mpsc;
 
 struct OrderBookSnapshotHandler {
     workers: OrderBookWorkerPool,
-    _dispatcher: NatsDispatcher,
+    dispatcher: NatsDispatcher,
+    market_state: MarketState,
+    next_event_sequence: u64,
+    last_watermark_ms: Option<i64>,
+    last_event_timestamp_ms: Option<i64>,
     last_perf: Option<ReplayHandlerPerfSnapshot>,
 }
 
@@ -42,12 +47,40 @@ impl OrderBookSnapshotHandler {
                 write_snapshot_parquet,
                 snapshot_parquet_dir,
                 Some(trading_store),
-                market_state,
             )?,
-            _dispatcher: dispatcher,
+            dispatcher,
+            market_state,
+            next_event_sequence: 1,
+            last_watermark_ms: None,
+            last_event_timestamp_ms: None,
             last_perf: None,
         })
     }
+}
+
+fn next_second_watermark(
+    safe_emit_time_ms: i64,
+    last_event_timestamp_ms: Option<i64>,
+    last_watermark_ms: Option<i64>,
+) -> Option<i64> {
+    let effective_safe_time = if safe_emit_time_ms == i64::MAX {
+        last_event_timestamp_ms?.saturating_add(1_000)
+    } else {
+        safe_emit_time_ms
+    };
+    let boundary = effective_safe_time.div_euclid(1_000) * 1_000;
+    if last_watermark_ms.is_some_and(|last| boundary <= last) {
+        None
+    } else {
+        Some(boundary)
+    }
+}
+
+fn validate_event_timestamp(timestamp_ms: i64, watermark_ms: Option<i64>) -> Result<()> {
+    if watermark_ms.is_some_and(|watermark| timestamp_ms < watermark) {
+        anyhow::bail!("event timestamp {timestamp_ms} is older than watermark {watermark_ms:?}");
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -59,7 +92,51 @@ impl ReplayHandler for OrderBookSnapshotHandler {
     }
 
     async fn on_events(&mut self, events: Vec<ReplayEvent>) -> anyhow::Result<()> {
-        self.last_perf = Some(self.workers.process_events(events).await?);
+        let sequenced_events = events
+            .into_iter()
+            .filter(|event| self.workers.should_track_event(event))
+            .map(|event| {
+                let sequence = self.next_event_sequence;
+                self.next_event_sequence += 1;
+                self.last_event_timestamp_ms = Some(event.timestamp_ms());
+                SequencedReplayEvent::new(sequence, event)
+            })
+            .collect::<Vec<_>>();
+        let worker_result = self
+            .workers
+            .process_events(sequenced_events.clone())
+            .await?;
+        let snapshots = worker_result
+            .snapshots
+            .into_iter()
+            .map(|snapshot| (snapshot.sequence, snapshot))
+            .collect::<HashMap<_, _>>();
+
+        for event in sequenced_events {
+            validate_event_timestamp(event.timestamp_ms(), self.last_watermark_ms)?;
+            self.dispatcher
+                .publish_raw_event(event.sequence, &event.event)
+                .await?;
+            if let Some(snapshot) = snapshots.get(&event.sequence) {
+                self.publish_snapshot(snapshot).await?;
+            }
+        }
+
+        self.last_perf = Some(worker_result.perf);
+        Ok(())
+    }
+
+    async fn on_watermark(&mut self, safe_emit_time_ms: i64) -> anyhow::Result<()> {
+        let Some(boundary) = next_second_watermark(
+            safe_emit_time_ms,
+            self.last_event_timestamp_ms,
+            self.last_watermark_ms,
+        ) else {
+            return Ok(());
+        };
+
+        self.dispatcher.publish_watermark(boundary).await?;
+        self.last_watermark_ms = Some(boundary);
         Ok(())
     }
 
@@ -68,9 +145,63 @@ impl ReplayHandler for OrderBookSnapshotHandler {
     }
 
     async fn on_day_end(&mut self, day: &str) -> anyhow::Result<()> {
-        self.workers.end_day().await?;
+        let mut snapshots = self.workers.end_day().await?;
+        for snapshot in &mut snapshots {
+            snapshot.sequence = self.next_event_sequence;
+            self.next_event_sequence += 1;
+            self.last_event_timestamp_ms = Some(
+                self.last_event_timestamp_ms
+                    .map_or(snapshot.timestamp_ms, |last| {
+                        last.max(snapshot.timestamp_ms)
+                    }),
+            );
+            self.publish_snapshot(snapshot).await?;
+        }
         info!(day = %day, "flushed order books for replay day");
         Ok(())
+    }
+}
+
+impl OrderBookSnapshotHandler {
+    async fn publish_snapshot(&mut self, snapshot: &MarketSnapshotUpdate) -> anyhow::Result<()> {
+        validate_event_timestamp(snapshot.timestamp_ms, self.last_watermark_ms)?;
+        self.dispatcher
+            .publish_snapshot(
+                snapshot.sequence,
+                snapshot.timestamp_ms,
+                &snapshot.code,
+                snapshot.snapshot.clone(),
+            )
+            .await?;
+        self.market_state.update(
+            &snapshot.code,
+            snapshot.timestamp_ms,
+            snapshot.last_price,
+            snapshot.is_call_auction,
+            &snapshot.snapshot,
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_second_watermark, validate_event_timestamp};
+
+    #[test]
+    fn watermark_is_a_half_open_second_boundary() {
+        assert_eq!(next_second_watermark(1_999, Some(1_234), None), Some(1_000));
+        assert_eq!(
+            next_second_watermark(2_000, Some(1_999), Some(1_000)),
+            Some(2_000)
+        );
+        assert_eq!(next_second_watermark(2_999, Some(2_500), Some(2_000)), None);
+    }
+
+    #[test]
+    fn rejects_event_older_than_published_watermark() {
+        assert!(validate_event_timestamp(999, Some(1_000)).is_err());
+        assert!(validate_event_timestamp(1_000, Some(1_000)).is_ok());
     }
 }
 
@@ -133,7 +264,13 @@ async fn run_internal(
         "starting replay"
     );
 
-    let dispatcher = NatsDispatcher::new(&config.nats)
+    let replay_run_id = format!(
+        "{}-{}-{}",
+        task_config.replay_start_date,
+        task_config.replay_end_date,
+        Utc::now().timestamp_millis()
+    );
+    let dispatcher = NatsDispatcher::new(&config.nats, replay_run_id)
         .await
         .context("failed to initialize nats dispatcher")?;
     let tracked_codes = if task_config.replay_codes.is_empty() {

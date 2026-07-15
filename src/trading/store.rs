@@ -223,6 +223,21 @@ impl TradingStore {
             .map_err(|source| TradingStoreError::QueryOrders { user_id, source })
     }
 
+    pub fn get_order(&self, user_id: i64, order_id: &str) -> StoreResult<TradingOrder> {
+        if user_id <= 0 {
+            return Err(TradingStoreError::InvalidUserId);
+        }
+        let order_id = order_id.trim();
+        let connection = self.open_connection()?;
+        query_order_by_id(&connection, order_id)
+            .map_err(|source| TradingStoreError::QueryOrders { user_id, source })?
+            .filter(|order| order.user_id == user_id)
+            .ok_or_else(|| TradingStoreError::OrderNotFound {
+                user_id,
+                order_id: order_id.to_string(),
+            })
+    }
+
     pub fn list_fills(&self, user_id: i64) -> StoreResult<Vec<Fill>> {
         if user_id <= 0 {
             return Err(TradingStoreError::InvalidUserId);

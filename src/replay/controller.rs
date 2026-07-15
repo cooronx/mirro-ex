@@ -1,21 +1,6 @@
-//!
-//! replay总入口模块。
-//! 1. 输入：
-//!    - 数据库配置 `DbConfig`
-//!    - 回放引擎配置 `ReplayConfig`
-//!    - 单次回放任务配置 `ReplayTaskConfig`
-//!    - 上层提供的 `ReplayHandler`
-//!
-//! 2. 输出：
-//!    - 按模拟时间节奏切好的 `ReplayEvent` 批次会被持续交给 `ReplayHandler::on_events()`
-//!    - 回放结束后返回一份 `ReplayRunReport`
-//!
-//! 3. 逻辑：
-//!    - 根据日期和时间窗构造查询条件
-//!    - 创建 `ReplayDbReader`、`SimClock` 和 `ReplayCoordinator`
-//!    - 驱动主循环定时tick，不断从 coordinator 取出当前可安全发出的事件
-//!    - 汇总整次回放的统计信息并形成最终报告
-//!
+//! replay 的运行入口。
+//! 负责按日期拆分回放窗口，组装 reader、模拟时钟和 coordinator，并驱动定时 tick。
+//! 安全释放的事件会交给 `ReplayHandler`，运行结束后汇总为 `ReplayRunReport`。
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -336,6 +321,10 @@ pub trait ReplayHandler: Send {
     }
 
     async fn on_events(&mut self, events: Vec<ReplayEvent>) -> anyhow::Result<()>;
+
+    async fn on_watermark(&mut self, _safe_emit_time_ms: i64) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     fn last_perf_snapshot(&self) -> Option<ReplayHandlerPerfSnapshot> {
         None
@@ -687,6 +676,14 @@ impl ReplayController {
                     .map_err(ReplayControllerError::Handler)?;
                 handler_elapsed_ms = handler_start.elapsed().as_millis();
             }
+            if !result.finished
+                && let Some(emitted_through_ms) = result.emitted_through_ms
+            {
+                handler
+                    .on_watermark(emitted_through_ms)
+                    .await
+                    .map_err(ReplayControllerError::Handler)?;
+            }
             let handler_detail = handler.last_perf_snapshot();
             max_handler_elapsed_ms = max_handler_elapsed_ms.max(handler_elapsed_ms);
             let tick_elapsed_ms = tick_process_start.elapsed().as_millis();
@@ -731,6 +728,12 @@ impl ReplayController {
             .on_day_end(&daily_window.day)
             .await
             .map_err(ReplayControllerError::Handler)?;
+        if !stopped {
+            handler
+                .on_watermark(i64::MAX)
+                .await
+                .map_err(ReplayControllerError::Handler)?;
+        }
 
         Ok(SingleDayReplayOutcome::Report {
             total_lag_ms,

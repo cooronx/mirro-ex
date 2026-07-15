@@ -1,20 +1,6 @@
-//!
-//! lane生产者模块。
-//! 1. 输入：
-//!    - `ReplayDbReader` 提供的批量读取能力
-//!    - 一组 `ReaderCursor`
-//!    - 每个 lane 对应的 `ChannelReplayLane`
-//!
-//! 2. 输出：
-//!    - 按 lane 切分的 `LaneOutput`
-//!    - 每个 lane 通过独立的 mpsc channel 把 ready batch / watermark / finished 状态发给 coordinator
-//!
-//! 3. 逻辑：
-//!    - 根据 cursor 集合构建 lane，并把 source 归并到正确的 lane key
-//!    - 后台不断从 `ReplayDbReader` 拉取下一批数据
-//!    - 把批次喂给对应 `ChannelReplayLane`，让 lane 产出当前 ready 的事件
-//!    - 把每个 lane 的 ready 事件、水位和完成状态异步发送给 `ReplayCoordinator`
-//!
+//! 为每个 market/channel lane 持续生产可回放事件。
+//! producer 从 `ReplayDbReader` 拉取批次，交给 `ChannelReplayLane` 完成 channel 内合流。
+//! ready batch 及其 watermark、完成状态通过独立 channel 发送给 `ReplayCoordinator`。
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -100,10 +86,6 @@ pub enum LaneOutput {
         events: Vec<ReplayEvent>,
         watermark_ms: Option<i64>,
     },
-    Progress {
-        lane_key: LaneKey,
-        watermark_ms: Option<i64>,
-    },
     Finished {
         lane_key: LaneKey,
     },
@@ -112,6 +94,15 @@ pub enum LaneOutput {
 pub struct LaneReceiver {
     pub(crate) lane_key: LaneKey,
     pub(crate) receiver: mpsc::Receiver<LaneOutput>,
+}
+
+fn ready_batch_output(lane_key: LaneKey, events: Vec<ReplayEvent>) -> Option<LaneOutput> {
+    let watermark_ms = events.last().map(ReplayEvent::timestamp_ms)?;
+    Some(LaneOutput::ReadyBatch {
+        lane_key,
+        events,
+        watermark_ms: Some(watermark_ms),
+    })
 }
 
 #[derive(Debug)]
@@ -132,7 +123,6 @@ struct LaneProducer {
     transaction_cursor: Option<ReaderCursor>,
     pending_transaction_batch: Option<FetchedBatch>,
     sender: mpsc::Sender<LaneOutput>,
-    last_sent_watermark_ms: Option<i64>,
 }
 
 pub async fn spawn_lane_producers(
@@ -311,7 +301,6 @@ impl LaneProducer {
             transaction_cursor: spec.transaction_cursor,
             pending_transaction_batch: spec.initial_transaction_batch,
             sender,
-            last_sent_watermark_ms: None,
         })
     }
 
@@ -327,16 +316,10 @@ impl LaneProducer {
 
             self.sync_finished_markers();
             let ready_events = self.lane.pop_ready_events();
-            let last_ready_timestamp_ms = ready_events.last().map(ReplayEvent::timestamp_ms);
-            let watermark_ms = self
-                .compute_progress_watermark_ms(last_ready_timestamp_ms)
-                .await?;
-            if !ready_events.is_empty() {
-                if !self.send_ready_batch(ready_events, watermark_ms).await? {
+            if let Some(output) = ready_batch_output(self.lane_key, ready_events) {
+                if !self.send_output(output).await? {
                     return Ok(());
                 }
-            } else if !self.send_progress_if_advanced(watermark_ms).await? {
-                return Ok(());
             }
 
             if self.is_finished() {
@@ -449,107 +432,55 @@ impl LaneProducer {
             && self.lane.transaction_buffer_len() == 0
     }
 
-    async fn send_ready_batch(
-        &mut self,
-        events: Vec<ReplayEvent>,
-        watermark_ms: Option<i64>,
-    ) -> Result<bool> {
-        if self
-            .sender
-            .send(LaneOutput::ReadyBatch {
-                lane_key: self.lane_key,
-                events,
-                watermark_ms,
-            })
-            .await
-            .is_err()
-        {
+    async fn send_output(&mut self, output: LaneOutput) -> Result<bool> {
+        if self.sender.send(output).await.is_err() {
             return Ok(false);
-        }
-
-        if let Some(watermark_ms) = watermark_ms {
-            self.last_sent_watermark_ms = Some(watermark_ms);
         }
 
         Ok(true)
     }
+}
 
-    async fn send_progress_if_advanced(&mut self, watermark_ms: Option<i64>) -> Result<bool> {
-        let Some(watermark_ms) = watermark_ms else {
-            return Ok(true);
+#[cfg(test)]
+mod tests {
+    use super::{LaneKey, LaneOutput, ready_batch_output};
+    use crate::common::{L2Order, Market, OrderDirection, OrderType};
+    use crate::replay::ReplayEvent;
+
+    fn order_event(timestamp_ms: i64) -> ReplayEvent {
+        ReplayEvent::Order(L2Order {
+            market: Market::XSHE,
+            channel: 2011,
+            message_number: 1,
+            code: "000651.XSHE".to_string(),
+            price: 1,
+            volume: 1,
+            direction: OrderDirection::Buy,
+            order_type: OrderType::Limit,
+            timestamp_ms,
+            order_number: 1,
+        })
+    }
+
+    #[test]
+    fn progress_watermark_does_not_advance_without_ready_events() {
+        assert!(ready_batch_output(LaneKey::new(Market::XSHE, 2011), Vec::new()).is_none());
+    }
+
+    #[test]
+    fn ready_events_and_watermark_are_sent_atomically() {
+        let output =
+            ready_batch_output(LaneKey::new(Market::XSHE, 2011), vec![order_event(700)]).unwrap();
+
+        let LaneOutput::ReadyBatch {
+            events,
+            watermark_ms,
+            ..
+        } = output
+        else {
+            panic!("expected ready batch");
         };
-
-        if self
-            .last_sent_watermark_ms
-            .is_some_and(|last_sent_watermark_ms| watermark_ms <= last_sent_watermark_ms)
-        {
-            return Ok(true);
-        }
-
-        if self
-            .sender
-            .send(LaneOutput::Progress {
-                lane_key: self.lane_key,
-                watermark_ms: Some(watermark_ms),
-            })
-            .await
-            .is_err()
-        {
-            return Ok(false);
-        }
-
-        self.last_sent_watermark_ms = Some(watermark_ms);
-        Ok(true)
-    }
-
-    async fn compute_progress_watermark_ms(
-        &mut self,
-        last_ready_timestamp_ms: Option<i64>,
-    ) -> Result<Option<i64>> {
-        if let Some(buffered_timestamp_ms) = self.lane.next_buffered_event_timestamp_ms() {
-            return Ok(Some(buffered_timestamp_ms));
-        }
-
-        let next_future_timestamp_ms = self.peek_next_lane_timestamp_ms().await?;
-        self.sync_finished_markers();
-        Ok(next_future_timestamp_ms.or(last_ready_timestamp_ms))
-    }
-
-    async fn peek_next_lane_timestamp_ms(&mut self) -> Result<Option<i64>> {
-        let mut next_timestamp_ms: Option<i64> = None;
-
-        if let Some(cursor) = self.order_cursor.as_mut() {
-            if !cursor.finished {
-                let peeked_timestamp_ms =
-                    ReplayDbReader::peek_next_event_timestamp_for_cursor(&self.pool, cursor)
-                        .await?;
-                if peeked_timestamp_ms.is_none() {
-                    cursor.advance_to(cursor.range.end_message_number);
-                }
-                next_timestamp_ms = match (next_timestamp_ms, peeked_timestamp_ms) {
-                    (Some(current), Some(candidate)) => Some(current.min(candidate)),
-                    (None, Some(candidate)) => Some(candidate),
-                    (current, None) => current,
-                };
-            }
-        }
-
-        if let Some(cursor) = self.transaction_cursor.as_mut() {
-            if !cursor.finished {
-                let peeked_timestamp_ms =
-                    ReplayDbReader::peek_next_event_timestamp_for_cursor(&self.pool, cursor)
-                        .await?;
-                if peeked_timestamp_ms.is_none() {
-                    cursor.advance_to(cursor.range.end_message_number);
-                }
-                next_timestamp_ms = match (next_timestamp_ms, peeked_timestamp_ms) {
-                    (Some(current), Some(candidate)) => Some(current.min(candidate)),
-                    (None, Some(candidate)) => Some(candidate),
-                    (current, None) => current,
-                };
-            }
-        }
-
-        Ok(next_timestamp_ms)
+        assert_eq!(events[0].timestamp_ms(), 700);
+        assert_eq!(watermark_ms, Some(700));
     }
 }

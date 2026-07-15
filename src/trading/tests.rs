@@ -104,6 +104,10 @@ fn create_buy_limit_order_freezes_cash() {
         .unwrap();
 
     assert_eq!(order.status, "new");
+    assert_eq!(
+        store.get_order(user_id, &order.order_id).unwrap().code,
+        "300274.XSHE"
+    );
     assert_eq!(account_cash(&path, user_id), (10_000, 8_000, 2_000));
     let _ = fs::remove_file(path);
 }

@@ -1,28 +1,11 @@
-//!
-//! 数据库批量读取模块。
-//! 1. 输入：
-//!    - ClickHouse 连接池 `DbPool`
-//!    - 各市场各表的 message range 查询结果
-//!    - 每条 source 当前的读取游标 `ReaderCursor`
-//!    - 批大小 `batch_size`
-//!
-//! 2. 输出：
-//!    - 若干个 `FetchedBatch`
-//!    - 每个 batch 对应一个 source 在某个 message range 内的统一事件列表
-//!
-//! 3. 逻辑：
-//!    - 把查询阶段得到的 channel/message range 转成 `ReaderCursor`
-//!    - 维护每条 source 当前已经读取到哪里
-//!    - 按 round-robin 方式为多个 cursor 规划下一批读取任务
-//!    - 从 ClickHouse 拉取委托/成交明细，并统一封装成 `ReplayEvent`
-//!
-use clickhouse::{Row, sql::Identifier};
-use serde::Deserialize;
+//! 从 ClickHouse 分批读取 replay 所需的委托和成交数据。
+//! 每条数据源使用独立的 `ReaderCursor` 推进，多个 cursor 按 round-robin 方式安排查询。
+//! 查询结果统一封装为 `FetchedBatch` 和 `ReplayEvent`。
 use thiserror::Error;
 use tokio::task::JoinError;
 
 use crate::common::{L2Order, Market};
-use crate::db::dbpool::{DbPool, DbPoolError};
+use crate::db::dbpool::DbPool;
 use crate::db::queries::sh_order_query::{
     SHOrderByRangeQuery, SHOrderQueryError, SHOrderRangeQuery, query_sh_order_message_ranges,
     query_sh_orders_by_range,
@@ -47,8 +30,6 @@ pub enum ReplayDbReaderError {
     InvalidBatchSize,
     #[error("max_batches must be greater than 0")]
     InvalidMaxBatches,
-    #[error("failed to acquire db client from pool")]
-    AcquireClient(#[from] DbPoolError),
     #[error("sh order query failed")]
     SHOrderQuery(#[from] SHOrderQueryError),
     #[error("sz order query failed")]
@@ -76,11 +57,6 @@ struct CursorBatchSpec {
     range: ChannelRange,
     begin_message_number: i64,
     end_message_number: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Row, Deserialize)]
-struct RawNextTimestamp {
-    timestamp_ms: i64,
 }
 
 /// 数据库重放器
@@ -217,18 +193,6 @@ impl ReplayDbReader {
         };
 
         Self::fetch_batch_for_spec(pool.clone(), batch_spec).await
-    }
-
-    pub async fn peek_next_event_timestamp_for_cursor(
-        pool: &DbPool,
-        cursor: &ReaderCursor,
-    ) -> Result<Option<i64>> {
-        match cursor.range.data_kind {
-            ReplayDataKind::Order => Self::peek_next_order_timestamp_for_cursor(pool, cursor).await,
-            ReplayDataKind::Transaction => {
-                Self::peek_next_transaction_timestamp_for_cursor(pool, cursor).await
-            }
-        }
     }
 
     pub async fn fetch_next_batches(&mut self, max_batches: usize) -> Result<Vec<FetchedBatch>> {
@@ -392,173 +356,6 @@ impl ReplayDbReader {
         )
         .with_codes(batch_spec.range.codes.clone());
         Ok(query_transactions_by_range(pool, &query).await?)
-    }
-
-    async fn peek_next_order_timestamp_for_cursor(
-        pool: &DbPool,
-        cursor: &ReaderCursor,
-    ) -> Result<Option<i64>> {
-        let client = pool.get_one().await?;
-
-        let rows = match cursor.range.market {
-            Market::XSHG => {
-                let mut sql = String::from(
-                    r#"
-                SELECT
-                    toUnixTimestamp64Milli(time) AS timestamp_ms
-                FROM ?
-                WHERE EventDate = toDate(?)
-                  AND time >= fromUnixTimestamp64Milli(?)
-                  AND time < fromUnixTimestamp64Milli(?)
-                  AND message_number >= ?
-                  AND message_number < ?
-                  AND channel = ?
-            "#,
-                );
-
-                if !cursor.range.codes.is_empty() {
-                    sql.push_str(" AND code IN (");
-                    for index in 0..cursor.range.codes.len() {
-                        if index > 0 {
-                            sql.push_str(", ");
-                        }
-                        sql.push('?');
-                    }
-                    sql.push(')');
-                }
-
-                sql.push_str(" ORDER BY message_number LIMIT 1");
-
-                let mut db_query = client
-                    .query(&sql)
-                    .bind(Identifier(&cursor.range.table_name))
-                    .bind(&cursor.range.day)
-                    .bind(cursor.range.start_time_ms)
-                    .bind(cursor.range.end_time_ms)
-                    .bind(cursor.next_message_number)
-                    .bind(cursor.range.end_message_number)
-                    .bind(cursor.range.channel);
-
-                for code in &cursor.range.codes {
-                    db_query = db_query.bind(code);
-                }
-
-                db_query
-                    .fetch_all::<RawNextTimestamp>()
-                    .await
-                    .map_err(|err| {
-                        ReplayDbReaderError::SHOrderQuery(SHOrderQueryError::Query(err))
-                    })?
-            }
-            Market::XSHE => {
-                let mut sql = String::from(
-                    r#"
-                SELECT
-                    toUnixTimestamp64Milli(time) AS timestamp_ms
-                FROM ?
-                WHERE EventDate = toDate(?)
-                  AND time >= fromUnixTimestamp64Milli(?)
-                  AND time < fromUnixTimestamp64Milli(?)
-                  AND message_number >= ?
-                  AND message_number < ?
-                  AND channel = ?
-            "#,
-                );
-
-                if !cursor.range.codes.is_empty() {
-                    sql.push_str(" AND code IN (");
-                    for index in 0..cursor.range.codes.len() {
-                        if index > 0 {
-                            sql.push_str(", ");
-                        }
-                        sql.push('?');
-                    }
-                    sql.push(')');
-                }
-
-                sql.push_str(" ORDER BY message_number LIMIT 1");
-
-                let mut db_query = client
-                    .query(&sql)
-                    .bind(Identifier(&cursor.range.table_name))
-                    .bind(&cursor.range.day)
-                    .bind(cursor.range.start_time_ms)
-                    .bind(cursor.range.end_time_ms)
-                    .bind(cursor.next_message_number)
-                    .bind(cursor.range.end_message_number)
-                    .bind(cursor.range.channel);
-
-                for code in &cursor.range.codes {
-                    db_query = db_query.bind(code);
-                }
-
-                db_query
-                    .fetch_all::<RawNextTimestamp>()
-                    .await
-                    .map_err(|err| {
-                        ReplayDbReaderError::SZOrderQuery(SZOrderQueryError::Query(err))
-                    })?
-            }
-            Market::Unknown => return Ok(None),
-        };
-
-        Ok(rows.into_iter().next().map(|row| row.timestamp_ms))
-    }
-
-    async fn peek_next_transaction_timestamp_for_cursor(
-        pool: &DbPool,
-        cursor: &ReaderCursor,
-    ) -> Result<Option<i64>> {
-        let client = pool.get_one().await?;
-        let mut sql = String::from(
-            r#"
-            SELECT
-                toUnixTimestamp64Milli(time) AS timestamp_ms
-            FROM ?
-            WHERE EventDate = toDate(?)
-              AND time >= fromUnixTimestamp64Milli(?)
-              AND time < fromUnixTimestamp64Milli(?)
-              AND message_number >= ?
-              AND message_number < ?
-              AND channel = ?
-        "#,
-        );
-
-        if !cursor.range.codes.is_empty() {
-            sql.push_str(" AND code IN (");
-            for index in 0..cursor.range.codes.len() {
-                if index > 0 {
-                    sql.push_str(", ");
-                }
-                sql.push('?');
-            }
-            sql.push(')');
-        }
-
-        sql.push_str(" ORDER BY message_number LIMIT 1");
-
-        let mut db_query = client
-            .query(&sql)
-            .bind(Identifier(&cursor.range.table_name))
-            .bind(&cursor.range.day)
-            .bind(cursor.range.start_time_ms)
-            .bind(cursor.range.end_time_ms)
-            .bind(cursor.next_message_number)
-            .bind(cursor.range.end_message_number)
-            .bind(cursor.range.channel);
-
-        for code in &cursor.range.codes {
-            db_query = db_query.bind(code);
-        }
-
-        let rows = db_query
-            .fetch_all::<RawNextTimestamp>()
-            .await
-            .map_err(|err| {
-                ReplayDbReaderError::TransactionQuery(TransactionQueryError::Query(err))
-            })?;
-
-        Ok(rows.into_iter().next().map(|row| row.timestamp_ms))
     }
 }
 
